@@ -8,6 +8,11 @@ from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 
+_REPEAT_IGNORED_PLACEHOLDERS_RE = re.compile(
+    r"^(?:\[(?:图片|表情|商城表情)\]\s*)+$"
+)
+
+
 class AntiFloodMixin:
     """为 Main 提供防刷屏检测能力。
 
@@ -66,6 +71,14 @@ class AntiFloodMixin:
         s = (text or "").strip().lower()
         s = re.sub(r"\s+", " ", s)
         return s
+
+    @staticmethod
+    def _repeat_message_key(normalized_text: str) -> str:
+        """Return an empty key for lossy placeholders that carry no identity."""
+        text = str(normalized_text or "").strip()
+        if not text or _REPEAT_IGNORED_PLACEHOLDERS_RE.fullmatch(text):
+            return ""
+        return text
 
     def _record_message(self, group_id: str, user_id: str, msg_id: str, text: str = "") -> None:
         """记录一条消息到对应的群/用户时间戳队列。
@@ -193,8 +206,8 @@ class AntiFloodMixin:
         long_text_enabled = self._cfg("long_text_detect_enabled", True, group_id=group_id)
         long_text_threshold = self._cfg_int("long_text_threshold", 500, group_id=group_id)
 
-        current_text = ""
-        current_len = 0
+        _, _, current_text, current_len = self._unpack_entry(dq[-1])
+        current_repeat_key = self._repeat_message_key(current_text)
         repeat_count = 0
         repeat_ids: List[str] = []
 
@@ -212,11 +225,10 @@ class AntiFloodMixin:
                 sec_count += 1
                 sec_ids.append(mid)
 
-            if current_text == "":
-                current_text = norm_text
-                current_len = msg_len
             # 重复消息：在主循环内同步统计次数并收集消息 ID，避免末尾再次遍历队列。
-            if repeat_enabled and repeat_window > 0 and current_text and dt < repeat_window and norm_text == current_text:
+            if (repeat_enabled and repeat_window > 0 and current_repeat_key
+                    and dt < repeat_window
+                    and self._repeat_message_key(norm_text) == current_repeat_key):
                 repeat_count += 1
                 repeat_ids.append(mid)
 
