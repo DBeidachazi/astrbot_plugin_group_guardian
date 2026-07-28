@@ -1205,6 +1205,57 @@ class NestedForwardTests(unittest.TestCase):
         self.assertIn("日抛plus/xxxxxx", audit_text)
         self.assertTrue(hit_types["context_scan"])
 
+    def test_normal_ai_mode_skips_two_ordinary_long_messages(self):
+        harness = _ContextHandleHarness(full_scan=False, llm_enabled=True)
+
+        async def consume(event):
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume(_Event(
+            [Plain("今天下午三点开会讨论项目进度")], message_id="81",
+            message_seq=81, timestamp=181,
+        )))
+        asyncio.run(consume(_Event(
+            [Plain("收到，我会提前准备相关材料")], message_id="82",
+            message_seq=82, timestamp=182,
+        )))
+
+        self.assertEqual(harness.llm_calls, 0)
+
+    def test_normal_ai_mode_skips_common_short_acknowledgements(self):
+        harness = _ContextHandleHarness(full_scan=False, llm_enabled=True)
+
+        async def consume(event):
+            return [item async for item in harness._handle_message(event)]
+
+        for index, text in enumerate(("好的", "收到", "谢谢"), start=85):
+            asyncio.run(consume(_Event(
+                [Plain(text)], message_id=str(index),
+                message_seq=index, timestamp=200 + index,
+            )))
+
+        self.assertEqual(harness.llm_calls, 0)
+
+    def test_normal_ai_mode_reviews_one_character_fragments_without_local_hit(self):
+        harness = _ContextHandleHarness(full_scan=False, llm_enabled=True)
+
+        async def consume(event):
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume(_Event(
+            [Plain("x")], message_id="83", message_seq=83, timestamp=183,
+        )))
+        self.assertEqual(harness.llm_calls, 0)
+
+        asyncio.run(consume(_Event(
+            [Plain("y")], message_id="84", message_seq=84, timestamp=184,
+        )))
+
+        self.assertEqual(harness.llm_calls, 1)
+        audit_text, hit_types = harness.llm_inputs[0]
+        self.assertIn("xy", audit_text)
+        self.assertTrue(hit_types["context_scan"])
+
     def test_normal_ai_mode_sends_ocr_screenshot_to_llm_without_local_hit(self):
         harness = _ScreenshotHandleHarness(full_scan=False, llm_enabled=True)
         event = _Event([{

@@ -15,6 +15,14 @@ REAL_WAIT_FOR = asyncio.wait_for
 
 
 def _install_astrbot_stubs():
+    # AstrBot 运行时自带 aiohttp；CI 只安装插件的独立依赖。这里提供测试所需
+    # 的最小接口，让 HTTP 会话测试不依赖完整 AstrBot 环境。
+    aiohttp = sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
+    if not hasattr(aiohttp, "ClientSession"):
+        aiohttp.ClientSession = lambda: None
+    if not hasattr(aiohttp, "ClientTimeout"):
+        aiohttp.ClientTimeout = lambda **kwargs: types.SimpleNamespace(**kwargs)
+
     astrbot = sys.modules.setdefault("astrbot", types.ModuleType("astrbot"))
     api = sys.modules.setdefault("astrbot.api", types.ModuleType("astrbot.api"))
     api.__path__ = getattr(api, "__path__", [])
@@ -157,6 +165,7 @@ class _ModerationHarness(moderation.ModerationMixin, utilities.UtilitiesMixin):
         self._llm_semaphore = semaphore
         self.llm_calls = 0
         self.last_prompt = ""
+        self.prompts = []
 
     async def _get_client(self, event=None):
         return self.client
@@ -170,6 +179,7 @@ class _ModerationHarness(moderation.ModerationMixin, utilities.UtilitiesMixin):
     async def _call_llm_safe(self, system_prompt, prompt):
         self.llm_calls += 1
         self.last_prompt = prompt
+        self.prompts.append(prompt)
         return '{"violation": false, "reason": "ok"}'
 
 
@@ -217,6 +227,25 @@ class _ConcurrentOcrHarness(moderation.ModerationMixin):
             }[image_url]
         finally:
             self.active -= 1
+
+
+class _QueuedOcrHarness(moderation.ModerationMixin):
+    def __init__(self):
+        self.config = {}
+        self._config_schema = {}
+        self._ocr_semaphore = asyncio.Semaphore(4)
+        self._llm_semaphore = asyncio.Semaphore(8)
+        self.started = []
+        self.first_wave_started = asyncio.Event()
+        self.release_first_wave = asyncio.Event()
+
+    async def _call_llm_ocr_impl(self, image_url, **_kwargs):
+        self.started.append(image_url)
+        if len(self.started) == 4:
+            self.first_wave_started.set()
+        if image_url != "five.png":
+            await self.release_first_wave.wait()
+        return image_url
 
 
 class _ConcurrentQrHarness(moderation.ModerationMixin):
@@ -406,18 +435,55 @@ class _AppealPromptHarness(appeal.AppealMixin):
 
 
 class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_moderation_llm_queue_timeout_does_not_start_provider(self):
+    async def test_moderation_llm_queue_waits_instead_of_auto_passing(self):
         semaphore = asyncio.Semaphore(0)
         harness = _ModerationHarness(semaphore=semaphore)
 
-        with patch.object(moderation, "LLM_SEMAPHORE_TIMEOUT", 0.01):
+        task = asyncio.create_task(harness._call_llm_for_moderation(
+            _ModerationEvent(), "cs", {"swear": True}, group_id="1"
+        ))
+        await asyncio.sleep(0.02)
+
+        self.assertFalse(task.done())
+        self.assertEqual(harness.llm_calls, 0)
+        semaphore.release()
+        result = await task
+
+        self.assertFalse(result["violation"])
+        self.assertEqual(harness.llm_calls, 1)
+
+    async def test_moderation_llm_queue_has_a_long_overload_boundary(self):
+        semaphore = asyncio.Semaphore(0)
+        harness = _ModerationHarness(semaphore=semaphore)
+
+        with patch.object(moderation, "LLM_QUEUE_TIMEOUT", 0.01):
             result = await harness._call_llm_for_moderation(
                 _ModerationEvent(), "cs", {"swear": True}, group_id="1"
             )
 
+        self.assertFalse(result["violation"])
         self.assertTrue(result["fallback"])
         self.assertEqual(harness.llm_calls, 0)
-        self.assertTrue(semaphore.locked())
+
+    async def test_full_scan_reviews_every_oversized_message_chunk(self):
+        harness = _ModerationHarness(semaphore=asyncio.Semaphore(2))
+        middle_evidence = "MIDDLE_IMAGE_EVIDENCE"
+        text = ("a" * 45_000) + middle_evidence + ("z" * 45_000)
+        text = harness._append_stream_rule_evidence(text, [])
+        expected_chunks = len(harness._llm_message_chunks(
+            text, {"full_scan": True}
+        ))
+
+        result = await harness._call_llm_for_moderation(
+            _ModerationEvent(), text, {"full_scan": True}, group_id="1"
+        )
+
+        self.assertFalse(result["violation"])
+        self.assertEqual(harness.llm_calls, expected_chunks)
+        self.assertIn(middle_evidence, "\n".join(harness.prompts))
+        self.assertTrue(
+            all("[审核分片 " in prompt for prompt in harness.prompts)
+        )
 
     async def test_group_history_hanging_api_is_cancelled_and_degrades_to_empty(self):
         client = _HangingClient()
@@ -513,9 +579,10 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "data": {"messages": [{
                 "message_id": 1, "message_seq": 1, "time": 101,
                 "sender": {"nickname": "before", "user_id": 9},
-                "message": [{
-                    "type": "image", "data": {"url": image_url},
-                }],
+                "message": [
+                    {"type": "text", "data": {"text": "x" * 1000}},
+                    {"type": "image", "data": {"url": image_url}},
+                ],
             }]},
         })
         harness = _ModerationHarness(client=client)
@@ -637,6 +704,46 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(client.max_active, 1)
 
+    async def test_history_queue_waits_instead_of_dropping_context(self):
+        client = _StaticClient({
+            "status": "ok", "retcode": 0, "data": {"messages": []},
+        })
+        harness = _ModerationHarness(client=client)
+        harness._history_semaphore = asyncio.Semaphore(0)
+
+        with patch.object(
+            moderation_context, "ONEBOT_HISTORY_QUEUE_TIMEOUT", 1.0,
+        ):
+            task = asyncio.create_task(
+                harness._fetch_context_messages("303", "1", current_seq=1)
+            )
+            await asyncio.sleep(0.02)
+            self.assertFalse(task.done())
+            self.assertEqual(client.calls, [])
+
+            harness._history_semaphore.release()
+            result = await task
+
+        self.assertEqual(result, [])
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_history_queue_timeout_does_not_wait_forever(self):
+        client = _StaticClient({
+            "status": "ok", "retcode": 0, "data": {"messages": []},
+        })
+        harness = _ModerationHarness(client=client)
+        harness._history_semaphore = asyncio.Semaphore(0)
+
+        with patch.object(
+            moderation_context, "ONEBOT_HISTORY_QUEUE_TIMEOUT", 0.01
+        ):
+            result = await harness._fetch_context_messages(
+                "304", "1", current_seq=1
+            )
+
+        self.assertEqual(result, [])
+        self.assertEqual(client.calls, [])
+
     async def test_ocr_hanging_llm_is_cancelled_and_degrades_to_empty(self):
         harness = _HangingOcrHarness()
 
@@ -668,8 +775,32 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
         result = await task
 
         self.assertEqual(
-            result, "[GIF动图] one\n[表情包] three\nfour"
+            result,
+            "[图片1OCR] [GIF动图] one\n"
+            "[图片3OCR] [表情包] three\n"
+            "[图片4OCR] four",
         )
+
+    async def test_fifth_slow_image_waits_for_ocr_slot_instead_of_dropping(self):
+        harness = _QueuedOcrHarness()
+        task = asyncio.create_task(harness._ocr_images(
+            None,
+            ["one.png", "two.png", "three.png", "four.png", "five.png"],
+            group_id="1",
+        ))
+        await REAL_WAIT_FOR(harness.first_wave_started.wait(), timeout=1)
+        await asyncio.sleep(0.02)
+        self.assertEqual(
+            harness.started,
+            ["one.png", "two.png", "three.png", "four.png"],
+        )
+        self.assertFalse(task.done())
+
+        harness.release_first_wave.set()
+        result = await task
+
+        self.assertEqual(harness.started[-1], "five.png")
+        self.assertIn("five.png", result)
 
     async def test_multi_image_qr_is_concurrent_ordered_and_failure_isolated(self):
         harness = _ConcurrentQrHarness()
@@ -697,7 +828,12 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
             harness.release.set()
             result = await task
 
-        self.assertEqual(result, "first\nthird-a\nthird-b\nfourth")
+        self.assertEqual(
+            result,
+            "[图片1二维码] first\n"
+            "[图片3二维码] third-a\nthird-b\n"
+            "[图片4二维码] fourth",
+        )
 
     async def test_cross_message_downloads_share_semaphore_and_http_session(self):
         release = asyncio.Event()
@@ -716,6 +852,7 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(session.calls), 1)
             self.assertEqual(session.max_active, 1)
+            self.assertFalse(second.done())
             release.set()
             results = await asyncio.gather(first, second)
 
@@ -800,7 +937,9 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 with lock:
                     state["active"] -= 1
 
-        with patch.object(image_audit, "_decode_qr_from_bytes", side_effect=fake_decode):
+        with patch.object(
+            image_audit, "_decode_qr_from_bytes", side_effect=fake_decode
+        ):
             first = asyncio.create_task(harness._run_qr_decoder(b"first", "fake"))
             second = asyncio.create_task(harness._run_qr_decoder(b"second", "fake"))
             try:
@@ -811,6 +950,7 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(first_started.is_set())
                 await asyncio.sleep(0.02)
                 self.assertEqual(state["max_active"], 1)
+                self.assertFalse(second.done())
             finally:
                 release.set()
             results = await asyncio.gather(first, second)
@@ -852,6 +992,82 @@ class TimeoutBoundaryTests(unittest.IsolatedAsyncioTestCase):
             result,
             "[二维码内容]\nqr-result\n[OCR识图内容]\nocr-result",
         )
+
+    async def test_image_audit_total_timeout_cancels_stuck_branches(self):
+        harness = _FullImageApplyHarness()
+
+        with patch.object(image_audit, "IMAGE_AUDIT_TOTAL_TIMEOUT", 0.01):
+            result = await harness._apply_ocr(
+                "message", ["one.png"], None, group_id="1"
+            )
+
+        self.assertIn("message", result)
+        self.assertIn("视觉模型未返回可用识别结果", result)
+
+    async def test_image_resource_close_cancels_tracked_branch_tasks(self):
+        harness = _FullImageApplyHarness()
+        harness._image_audit_tasks = set()
+        harness._image_audit_closing = False
+        harness._image_http_session = None
+        harness._image_http_session_lock = asyncio.Lock()
+        task = asyncio.create_task(harness._apply_ocr(
+            "message", ["one.png"], None, group_id="1"
+        ))
+        await REAL_WAIT_FOR(harness.both_started.wait(), timeout=1)
+
+        await harness._close_image_audit_resources()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(harness._image_audit_tasks, set())
+
+    async def test_qr_decoder_timeout_does_not_block_the_event_chain(self):
+        harness = _QrDecodeSemaphoreHarness(concurrency=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def stuck_decode(_data, _decoder):
+            started.set()
+            release.wait(timeout=1)
+            return []
+
+        try:
+            with patch.object(
+                image_audit, "_decode_qr_from_bytes", side_effect=stuck_decode
+            ), patch.object(image_audit, "IMAGE_QR_DECODE_TIMEOUT", 0.01):
+                result = await harness._run_qr_decoder(b"data", "fake")
+            self.assertTrue(started.is_set())
+            self.assertEqual(result, [])
+            self.assertTrue(harness._qr_decode_semaphore.locked())
+        finally:
+            release.set()
+        for _ in range(100):
+            if not harness._qr_decode_semaphore.locked():
+                break
+            await asyncio.sleep(0.01)
+        self.assertFalse(harness._qr_decode_semaphore.locked())
+
+    async def test_dns_timeout_rejects_image_without_blocking(self):
+        harness = _QrDecodeSemaphoreHarness()
+        started = threading.Event()
+        release = threading.Event()
+
+        def stuck_lookup(_host):
+            started.set()
+            release.wait(timeout=1)
+            return False
+
+        try:
+            with patch.object(
+                harness, "_is_private_host", side_effect=stuck_lookup
+            ), patch.object(image_audit, "IMAGE_DNS_TIMEOUT", 0.01):
+                result = await harness._is_safe_image_url(
+                    "https://example.com/image.png"
+                )
+            self.assertTrue(started.is_set())
+            self.assertFalse(result)
+        finally:
+            release.set()
 
     async def test_appeal_hanging_llm_is_cancelled_with_bounded_runner(self):
         harness = _AppealHarness()

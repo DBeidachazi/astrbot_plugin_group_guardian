@@ -12,14 +12,20 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 
 
 LLM_CALL_TIMEOUT = 60.0
-LLM_SEMAPHORE_TIMEOUT = 10.0
-IMAGE_QUEUE_TIMEOUT = 10.0
+OCR_QUEUE_TIMEOUT = 300.0
+IMAGE_QUEUE_TIMEOUT = 120.0
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 IMAGE_DOWNLOAD_TIMEOUT = 10.0
+IMAGE_DNS_TIMEOUT = 5.0
+IMAGE_QR_DECODE_TIMEOUT = 10.0
+IMAGE_AUDIT_TOTAL_TIMEOUT = 600.0
 IMAGE_MAX_REDIRECTS = 3
 IMAGE_EVIDENCE_CACHE_TTL_SECONDS = 900
 IMAGE_EVIDENCE_CACHE_MAX_ENTRIES = 4096
 IMAGE_EVIDENCE_MAX_CHARS = 1000
+IMAGE_BRANCH_EVIDENCE_MAX_CHARS = 20_000
+IMAGE_COMBINED_AUDIT_MAX_CHARS = 92_000
+IMAGE_WORKER_CONCURRENCY = 4
 
 _QR_DECODER = None      # "cv2" | "pyzbar" | None
 _QR_PROBED = False
@@ -112,21 +118,31 @@ class ImageAuditMixin:
         self._image_http_session = None
         self._image_http_session_lock = asyncio.Lock()
         self._image_audit_closing = False
+        self._image_audit_tasks = set()
         self._image_evidence_cache = {}
 
     async def _close_image_audit_resources(self) -> None:
-        """关闭插件实例持有的 HTTP 会话；重复调用是安全的。"""
+        """取消在途图片分支并关闭 HTTP 会话；重复调用是安全的。"""
         lock = getattr(self, "_image_http_session_lock", None)
         if lock is None:
             lock = asyncio.Lock()
             self._image_http_session_lock = lock
         async with lock:
             self._image_audit_closing = True
+            current_task = asyncio.current_task()
+            tasks = [
+                task for task in getattr(self, "_image_audit_tasks", set())
+                if task is not current_task and not task.done()
+            ]
             session = getattr(self, "_image_http_session", None)
             self._image_http_session = None
             cache = getattr(self, "_image_evidence_cache", None)
             if isinstance(cache, dict):
                 cache.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if session is None or getattr(session, "closed", False):
             return
         try:
@@ -168,6 +184,54 @@ class ImageAuditMixin:
             if limit is not None and len(selected) >= max(0, int(limit)):
                 break
         return selected
+
+    @staticmethod
+    async def _map_image_work(items: list, worker, concurrency: int = 4) -> list:
+        """Process arbitrary image counts with a fixed number of worker tasks."""
+        items = list(items or [])
+        if not items:
+            return []
+        results = [None] * len(items)
+        next_index = 0
+
+        async def run_worker() -> None:
+            nonlocal next_index
+            while next_index < len(items):
+                index = next_index
+                next_index += 1
+                results[index] = await worker(items[index])
+
+        worker_count = min(len(items), max(1, int(concurrency)))
+        await asyncio.gather(*(run_worker() for _ in range(worker_count)))
+        return results
+
+    def _create_image_audit_task(self, coroutine):
+        """Track branch tasks so plugin unload can cancel queued image work."""
+        task = asyncio.create_task(coroutine)
+        tasks = getattr(self, "_image_audit_tasks", None)
+        if isinstance(tasks, set):
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        return task
+
+    def _format_image_evidence(self, results: list, kind: str) -> str:
+        """Give every successful image a fair share of the prompt budget."""
+        entries = []
+        for index, result in enumerate(results or [], start=1):
+            result = str(result or "").strip()
+            if result:
+                entries.append((f"[图片{index}{kind}] ", result))
+        if not entries:
+            return ""
+
+        overhead = sum(len(label) for label, _ in entries) + len(entries) - 1
+        text_budget = max(0, IMAGE_BRANCH_EVIDENCE_MAX_CHARS - overhead)
+        per_item, remainder = divmod(text_budget, len(entries))
+        lines = []
+        for index, (label, result) in enumerate(entries):
+            item_budget = per_item + (1 if index < remainder else 0)
+            lines.append(label + self._bounded_audit_text(result, item_budget))
+        return "\n".join(lines)[:IMAGE_BRANCH_EVIDENCE_MAX_CHARS]
 
     def _cache_image_evidence(self, url: str, kind: str, text: str) -> None:
         """Cache bounded OCR/QR evidence for later group-history prompts."""
@@ -242,8 +306,10 @@ class ImageAuditMixin:
                 logger.debug(f"[GroupMgr] OCR识别失败: {exc}")
             return ""
 
-        results = await asyncio.gather(*(recognize(url) for url in selected_urls))
-        return "\n".join(result for result in results if result)
+        results = await self._map_image_work(
+            selected_urls, recognize, IMAGE_WORKER_CONCURRENCY
+        )
+        return self._format_image_evidence(results, "OCR")
 
     async def _call_llm_ocr(
         self,
@@ -252,13 +318,13 @@ class ImageAuditMixin:
         is_sticker: bool = False,
         group_id: str = "",
     ) -> str:
-        """限制 OCR 排队和 Provider 执行时长。"""
+        """限制 OCR 实际并发；峰值排队等待，长期过载有明确边界。"""
         semaphore = getattr(self, "_ocr_semaphore", None)
         acquired = False
         try:
             if semaphore is not None:
                 await asyncio.wait_for(
-                    semaphore.acquire(), timeout=LLM_SEMAPHORE_TIMEOUT
+                    semaphore.acquire(), timeout=OCR_QUEUE_TIMEOUT
                 )
                 acquired = True
             return await self._run_llm_with_limits(
@@ -271,7 +337,7 @@ class ImageAuditMixin:
                 timeout=LLM_CALL_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            logger.warning("[GroupMgr] OCR LLM调用超时或排队超时")
+            logger.warning("[GroupMgr] OCR LLM调用或排队超时")
             return ""
         except Exception as exc:
             logger.debug(f"[GroupMgr] OCR LLM调用失败: {exc}")
@@ -394,14 +460,45 @@ class ImageAuditMixin:
             if ocr_urls:
                 ocr_call = self._ocr_images(event, ocr_urls, group_id=group_id)
 
-        if qr_call is not None and ocr_call is not None:
-            qr_text, ocr_text = await asyncio.gather(qr_call, ocr_call)
-        elif qr_call is not None:
-            qr_text, ocr_text = await qr_call, ""
-        elif ocr_call is not None:
-            qr_text, ocr_text = "", await ocr_call
-        else:
-            qr_text = ocr_text = ""
+        branches = {}
+        if qr_call is not None:
+            branches["qr"] = self._create_image_audit_task(qr_call)
+        if ocr_call is not None:
+            branches["ocr"] = self._create_image_audit_task(ocr_call)
+        qr_text = ocr_text = ""
+        if branches:
+            tasks = set(branches.values())
+            try:
+                done, pending = await asyncio.wait(
+                    tasks, timeout=IMAGE_AUDIT_TOTAL_TIMEOUT
+                )
+            except asyncio.CancelledError:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            if pending:
+                logger.warning(
+                    f"[GroupMgr] 单条消息图片审核总时长超限: group={group_id}, "
+                    f"pending={len(pending)}"
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            for name, task in branches.items():
+                if task not in done or task.cancelled():
+                    continue
+                try:
+                    result = task.result()
+                except Exception as exc:
+                    logger.debug(f"[GroupMgr] 图片{name}分支失败: {exc}")
+                    continue
+                if name == "qr":
+                    qr_text = result
+                else:
+                    ocr_text = result
+        if getattr(self, "_image_audit_closing", False):
+            raise asyncio.CancelledError
 
         if qr_text:
             text = (
@@ -424,7 +521,7 @@ class ImageAuditMixin:
             )
         if not text:
             return ""
-        return self._bounded_audit_text(text, self._FORWARD_MAX_CHARS)
+        return self._bounded_audit_text(text, IMAGE_COMBINED_AUDIT_MAX_CHARS)
 
     async def _decode_qrcodes(self, image_urls: list) -> str:
         """受控并发下载并解码全部图片，结果保持图片原顺序。"""
@@ -455,13 +552,15 @@ class ImageAuditMixin:
                 logger.debug(f"[GroupMgr] 二维码解码失败: {exc}")
                 return []
 
-        decoded = await asyncio.gather(
-            *(decode(url) for url in self._select_image_urls(image_urls))
+        selected_urls = self._select_image_urls(image_urls)
+        decoded = await self._map_image_work(
+            selected_urls, decode, IMAGE_WORKER_CONCURRENCY
         )
-        results = [value for image_values in decoded for value in image_values]
-        if results:
-            logger.info(f"[GroupMgr] 二维码解码命中 {len(results)} 条")
-        return "\n".join(results)
+        hit_count = sum(len(values or []) for values in decoded)
+        if hit_count:
+            logger.info(f"[GroupMgr] 二维码解码命中 {hit_count} 条")
+        joined = ["\n".join(values or []) for values in decoded]
+        return self._format_image_evidence(joined, "二维码")
 
     async def _run_qr_decoder(self, data: bytes, decoder: str) -> list:
         """以插件实例级许可限制实际运行中的二维码线程数。"""
@@ -476,10 +575,22 @@ class ImageAuditMixin:
                 acquired = True
             loop = asyncio.get_running_loop()
             future = loop.run_in_executor(None, _decode_qr_from_bytes, data, decoder)
-            return await asyncio.shield(future)
+            return await asyncio.wait_for(
+                asyncio.shield(future), timeout=IMAGE_QR_DECODE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            if acquired and future is not None:
+                future.add_done_callback(
+                    lambda _future, sem=semaphore: sem.release()
+                )
+                acquired = False
+            logger.debug("[GroupMgr] 二维码解码或排队超时")
+            return []
         except asyncio.CancelledError:
             if acquired and future is not None:
-                future.add_done_callback(lambda _future: semaphore.release())
+                future.add_done_callback(
+                    lambda _future, sem=semaphore: sem.release()
+                )
                 acquired = False
             raise
         finally:
@@ -520,9 +631,14 @@ class ImageAuditMixin:
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
             return False
         loop = asyncio.get_running_loop()
-        is_private = await loop.run_in_executor(
-            None, self._is_private_host, parsed.hostname
-        )
+        try:
+            is_private = await asyncio.wait_for(
+                loop.run_in_executor(None, self._is_private_host, parsed.hostname),
+                timeout=IMAGE_DNS_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.debug(f"[GroupMgr] 图片地址 DNS 解析超时: {parsed.hostname}")
+            return False
         if is_private:
             logger.debug(
                 f"[GroupMgr] 拒绝下载内网/不可解析地址图片: {parsed.hostname}"

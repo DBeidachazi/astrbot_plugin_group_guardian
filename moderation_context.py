@@ -9,18 +9,18 @@ from typing import Tuple
 from astrbot.api import logger
 
 
-CONTEXT_MESSAGE_MAX_CHARS = 200
-CONTEXT_TOTAL_MAX_CHARS = 3000
+CONTEXT_MESSAGE_MAX_CHARS = 600
+CONTEXT_IMAGE_EVIDENCE_MAX_CHARS = 400
+CONTEXT_TOTAL_MAX_CHARS = 6000
 LOCAL_CONTEXT_MAX_ENTRIES = 50
 LOCAL_CONTEXT_PROMPT_MAX_ENTRIES = 20
 LOCAL_CONTEXT_RETENTION_SECONDS = 900
 LOCAL_CONTEXT_MESSAGE_MAX_CHARS = 1000
 LOCAL_CONTEXT_MAX_USERS = 2048
 LOCAL_CONTEXT_CLEANUP_INTERVAL_SECONDS = 300
-CONTEXT_PENDING_WAIT_TIMEOUT = 75.0
 CONTEXT_EVENT_KEY_FALLBACK_MAX = 4096
 ONEBOT_HISTORY_TIMEOUT = 20.0
-ONEBOT_HISTORY_QUEUE_TIMEOUT = 5.0
+ONEBOT_HISTORY_QUEUE_TIMEOUT = 60.0
 HISTORY_CACHE_TTL_SECONDS = 1.5
 HISTORY_CACHE_MAX_GROUPS = 256
 HISTORY_FETCH_COUNT = 100
@@ -30,6 +30,15 @@ COMBINED_HANDLED_CLEANUP_INTERVAL_SECONDS = 60
 
 _CONTEXT_EVENT_KEY_MARKER = object()
 _CONTEXT_EVENT_KEY_ATTR = "_group_guardian_context_key"
+
+_COMBINED_SEMANTIC_SUSPECT_RE = re.compile(
+    r"(?:日抛|周抛|月抛|plus|福利|资源|上车|接单|兼职|代理|代购|推广|引流|"
+    r"联系|私聊|加(?:我|q|v|vx|wx)|微信|微\s*信|v\s*x|w\s*x|扫码|"
+    r"频道|返利|低价|出售|购买|免费领|/\s*[a-z0-9_.-]{3,}|"
+    r"(?:qq|群)\s*[:：]?\s*\d{5,}|@\s*[a-z0-9_.-]{3,}|"
+    r"https?://|www\.|[a-z0-9-]+\.(?:com|cn|net|top|xyz))",
+    re.IGNORECASE,
+)
 
 
 class ModerationContextMixin:
@@ -431,16 +440,9 @@ class ModerationContextMixin:
             ready_events.append(ready_event)
         if not ready_events:
             return
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*(ready.wait() for ready in ready_events)),
-                timeout=CONTEXT_PENDING_WAIT_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"[GroupMgr] 等待更早图片上下文超时: group={group_id}, "
-                f"user={user_id}, pending={len(ready_events)}"
-            )
+        # 每个图片分支自身已有下载/Provider 执行边界；这里不再设置更短的
+        # 二次超时，否则多图分批处理时后续消息会越过尚未完成的 OCR。
+        await asyncio.gather(*(ready.wait() for ready in ready_events))
 
     @staticmethod
     def _local_context_order(entry: dict) -> tuple:
@@ -700,3 +702,23 @@ class ModerationContextMixin:
             "\x1f".join(signature_parts).encode("utf-8", "ignore")
         ).hexdigest()
         return f"{seamless}\n{spaced}", message_ids, signature
+
+    @staticmethod
+    def _combined_needs_semantic_review(combined_text: str) -> bool:
+        """筛出值得 LLM 复核的零规则命中组合，控制普通模式调用量。"""
+        seamless, _, spaced = str(combined_text or "").partition("\n")
+        if not seamless:
+            return False
+        if _COMBINED_SEMANTIC_SUSPECT_RE.search(combined_text):
+            return True
+
+        # 逐字发送仍要复核。两条正常短句或长句不满足该形态，避免普通模式
+        # 从第二次发言起几乎每条都调用 LLM。
+        parts = [part for part in spaced.split(" ") if part]
+        if len(parts) < 2:
+            return False
+        single_char_parts = sum(len(part) == 1 for part in parts)
+        return (
+            len(seamless) <= 32
+            and single_char_parts >= max(2, (len(parts) * 2 + 2) // 3)
+        )
