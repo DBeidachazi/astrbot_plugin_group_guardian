@@ -1,3 +1,7 @@
 # 审查规则
 
-在此目录下存放项目审查规则和编码规范。
+- [编码规范与项目约定](coding-standards.md)
+- [Issue 分析规范](issue-analysis.md)
+- [审核与防刷屏不变量](moderation-invariants.md)
+- [AstrBot 工具 Schema 规则](tool-schema.md)
+- [跨入口变更检查表](change-impact-checklist.md)
