@@ -12,11 +12,13 @@ from astrbot.api import logger
 
 try:
     from .lexicon_migration import ensure_swear_expansion
+    from .storage_group import GroupStorageMixin
 except ImportError:  # 允许直接运行 storage.py 的离线迁移/测试脚本
     from lexicon_migration import ensure_swear_expansion
+    from storage_group import GroupStorageMixin
 
 
-class SQLiteStorage:
+class SQLiteStorage(GroupStorageMixin):
     # 持久化层统一使用 SQLite。_connect() 是 contextmanager，进入时创建连接并开启 WAL，退出时自动关闭。
     # 审核日志按 message_id + group_id + user_id + time 组合键去重。
     # seed_lexicon_db 是发布时打包进插件的内置词库，只在首次初始化时复制到 data 目录。
@@ -1379,173 +1381,5 @@ class SQLiteStorage:
                 "DELETE FROM group_admin_block WHERE group_id=? AND user_id=?",
                 (str(group_id), str(user_id)),
             )
-            conn.commit()
-        return bool(cur.rowcount)
-
-    # ============================================================
-    # v2.3.0 新增：多群独立配置 group_configs
-    # ============================================================
-    def get_group_config(self, group_id: str, key: str):
-        # 读取某群对某配置项的覆盖值（字符串），不存在返回 None。
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT value FROM group_configs WHERE group_id=? AND key=?",
-                (str(group_id), str(key)),
-            ).fetchone()
-        return row["value"] if row else None
-
-    def get_group_configs(self, group_id: str) -> Dict[str, str]:
-        # 读取某群的全部配置覆盖，返回 {key: value(str)}。
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT key, value FROM group_configs WHERE group_id=?",
-                (str(group_id),),
-            ).fetchall()
-        return {r["key"]: r["value"] for r in rows}
-
-    def set_group_config(self, group_id: str, key: str, value: str) -> None:
-        # 设置/更新某群某配置项的覆盖值。
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO group_configs(group_id, key, value) VALUES(?, ?, ?)",
-                (str(group_id), str(key), str(value)),
-            )
-            conn.commit()
-
-    def delete_group_config(self, group_id: str, key: str) -> bool:
-        # 删除某群某配置项的覆盖（恢复为继承全局）。
-        with self._connect() as conn:
-            cur = conn.execute(
-                "DELETE FROM group_configs WHERE group_id=? AND key=?",
-                (str(group_id), str(key)),
-            )
-            conn.commit()
-        return bool(cur.rowcount)
-
-    def clear_group_configs(self, group_id: str) -> int:
-        # 清空某群的全部配置覆盖（整群恢复继承全局）。
-        with self._connect() as conn:
-            cur = conn.execute("DELETE FROM group_configs WHERE group_id=?", (str(group_id),))
-            conn.commit()
-        return int(cur.rowcount or 0)
-
-    def list_configured_groups(self) -> List[str]:
-        # 列出所有有自定义配置的群号。
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT group_id FROM group_configs ORDER BY group_id"
-            ).fetchall()
-        return [r["group_id"] for r in rows]
-
-    # ==================== 名片监控 ====================
-
-    def add_card_change_log(self, kind: str, group_id: str, user_id: str, user_name: str,
-                            old_value: str, new_value: str, action: str, ts: int, time_str: str) -> int:
-        """记录一条名片变更/管理员任免日志，返回新行 id。"""
-        with self._connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO card_change_logs(ts, time, kind, group_id, user_id, user_name, old_value, new_value, action) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (int(ts), str(time_str), str(kind), str(group_id), str(user_id),
-                 str(user_name or ""), str(old_value or ""), str(new_value or ""), str(action or "")),
-            )
-            conn.commit()
-        return int(cur.lastrowid or 0)
-
-    def list_card_change_logs(self, limit: int = 50, offset: int = 0,
-                              group_id: str = "", user_id: str = "", kind: str = "") -> List[dict]:
-        sql = "SELECT * FROM card_change_logs WHERE 1=1"
-        params: List[object] = []
-        if group_id:
-            sql += " AND group_id=?"
-            params.append(str(group_id))
-        if user_id:
-            sql += " AND user_id=?"
-            params.append(str(user_id))
-        if kind:
-            sql += " AND kind=?"
-            params.append(str(kind))
-        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
-        params.extend([int(limit), int(offset)])
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [{
-            "id": r["id"], "ts": r["ts"], "time": r["time"], "kind": r["kind"],
-            "group_id": r["group_id"], "user_id": r["user_id"], "user_name": r["user_name"],
-            "old_value": r["old_value"], "new_value": r["new_value"], "action": r["action"],
-        } for r in rows]
-
-    def count_card_change_logs(self, group_id: str = "", user_id: str = "", kind: str = "") -> int:
-        sql = "SELECT COUNT(*) AS c FROM card_change_logs WHERE 1=1"
-        params: List[object] = []
-        if group_id:
-            sql += " AND group_id=?"
-            params.append(str(group_id))
-        if user_id:
-            sql += " AND user_id=?"
-            params.append(str(user_id))
-        if kind:
-            sql += " AND kind=?"
-            params.append(str(kind))
-        with self._connect() as conn:
-            row = conn.execute(sql, params).fetchone()
-        return int(row["c"] or 0)
-
-    def clear_card_change_logs(self, group_id: str = "") -> int:
-        with self._connect() as conn:
-            if group_id:
-                cur = conn.execute("DELETE FROM card_change_logs WHERE group_id=?", (str(group_id),))
-            else:
-                cur = conn.execute("DELETE FROM card_change_logs")
-            conn.commit()
-        return int(cur.rowcount or 0)
-
-    def prune_card_change_logs(self, keep: int = 5000) -> int:
-        """仅保留最近 keep 条，删除更早的，防止无限增长。"""
-        with self._connect() as conn:
-            cur = conn.execute(
-                "DELETE FROM card_change_logs WHERE id NOT IN "
-                "(SELECT id FROM card_change_logs ORDER BY id DESC LIMIT ?)",
-                (int(keep),),
-            )
-            conn.commit()
-        return int(cur.rowcount or 0)
-
-    # ---- 名片保护名单 ----
-
-    def list_card_protected(self, group_id: str = "") -> List[dict]:
-        with self._connect() as conn:
-            if group_id:
-                rows = conn.execute(
-                    "SELECT group_id, user_id, protected_card, created_at FROM card_protected_members "
-                    "WHERE group_id=? ORDER BY created_at DESC", (str(group_id),)).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT group_id, user_id, protected_card, created_at FROM card_protected_members "
-                    "ORDER BY group_id, created_at DESC").fetchall()
-        return [{"group_id": r["group_id"], "user_id": r["user_id"],
-                 "protected_card": r["protected_card"], "created_at": r["created_at"]} for r in rows]
-
-    def get_card_protected(self, group_id: str, user_id: str) -> Optional[str]:
-        """返回被保护成员的应有名片；不在保护名单返回 None。"""
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT protected_card FROM card_protected_members WHERE group_id=? AND user_id=?",
-                (str(group_id), str(user_id))).fetchone()
-        return row["protected_card"] if row else None
-
-    def add_card_protected(self, group_id: str, user_id: str, protected_card: str, created_at: int) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO card_protected_members(group_id, user_id, protected_card, created_at) "
-                "VALUES(?, ?, ?, ?)",
-                (str(group_id), str(user_id), str(protected_card), int(created_at)))
-            conn.commit()
-
-    def remove_card_protected(self, group_id: str, user_id: str) -> bool:
-        with self._connect() as conn:
-            cur = conn.execute(
-                "DELETE FROM card_protected_members WHERE group_id=? AND user_id=?",
-                (str(group_id), str(user_id)))
             conn.commit()
         return bool(cur.rowcount)

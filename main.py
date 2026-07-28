@@ -76,10 +76,15 @@ class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMo
         self._web_member_cache = {}
         # WebUI 规则数量缓存（30s TTL），规则变更时置 None 失效
         self._rule_count_cache = None
-        # 组合消息检测处理冷却表：{(group_id, user_id): 到期时间戳}
-        self._combined_handled = {}
-        # LLM 并发信号量：同一时刻最多 5 个 LLM 请求，防止所有 provider 被填满
-        self._llm_semaphore = asyncio.Semaphore(5)
+        # 全量审核会为每条消息调用 LLM，使用可配置的高并发总闸门。OCR 再加一层
+        # 4 路上限，防止多图消息占满全部许可，给正文/入群/名片审核保留容量。
+        llm_concurrency = max(1, min(
+            self._cfg_int("llm_max_concurrency", 12), 32
+        ))
+        self._llm_semaphore = asyncio.Semaphore(llm_concurrency)
+        # 审核上下文独立于防刷屏队列，并负责合并/限流群历史请求。
+        self._init_moderation_context_resources(llm_concurrency)
+        self._init_image_audit_resources(llm_concurrency)
         # 防刷屏追踪数据结构
         self._init_anti_flood()
         # 热更新重建状态：前端可轮询显示当前是否在后台重建规则/词库
@@ -101,6 +106,8 @@ class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMo
             except asyncio.CancelledError:
                 logger.debug("[GroupMgr] 后台重建任务已取消")
         await self._stop_scheduler()
+        await self._close_moderation_context_resources()
+        await self._close_image_audit_resources()
         logger.info("[GroupMgr] 插件卸载，SQLite 存储已自动持久化")
 
     def _set_rebuild_status(self, state: str, target: str = "", message: str = "") -> None:

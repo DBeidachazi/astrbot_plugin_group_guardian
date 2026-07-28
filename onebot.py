@@ -536,42 +536,67 @@ class OneBotMixin:
             logger.debug(f"[GroupMgr] 撤回用户近期消息失败({group_id}/{user_id}): {e}")
         return recalled
 
-    async def _kick_member(self, event: AiocqhttpMessageEvent):
+    async def _kick_member(self, event: AiocqhttpMessageEvent) -> bool:
         group_id = self._get_group_id(event)
         user_id = self._try_get_sender_id(event)
         if not group_id or not user_id:
-            return
+            return False
         client = await self._get_client(event)
         if not client:
-            return
+            return False
         gid = self._safe_int(group_id, 0)
         uid = self._safe_int(user_id, 0)
         if not gid or not uid:
-            return
+            return False
         try:
-            await asyncio.wait_for(client.call_action('set_group_kick', group_id=gid, user_id=uid), timeout=ONEBOT_CALL_TIMEOUT)
+            result = await asyncio.wait_for(
+                client.call_action(
+                    'set_group_kick', group_id=gid, user_id=uid
+                ),
+                timeout=ONEBOT_CALL_TIMEOUT,
+            )
+            ok, error = self._check_api_result(result, "踢人")
+            if not ok:
+                logger.warning(f"[GroupMgr] 踢人失败: {error}")
+                return False
+            return True
         except Exception as e:
             # 业务性失败（无权限等）不清空 client 缓存——_get_client 自带三级回退，
             # 粗暴置 None 会让后续 _fetch_context_messages 等静默丢失上下文（审查 P0-6）
             logger.warning(f"[GroupMgr] 踢人失败: {e}")
+            return False
 
-    async def _mute_member(self, event: AiocqhttpMessageEvent, duration: int = None):
+    async def _mute_member(
+        self, event: AiocqhttpMessageEvent, duration: int = None
+    ) -> bool:
         group_id = self._get_group_id(event)
         user_id = self._try_get_sender_id(event)
         if not group_id or not user_id:
-            return
+            return False
         client = await self._get_client(event)
         if not client:
-            return
+            return False
         gid = self._safe_int(group_id, 0)
         uid = self._safe_int(user_id, 0)
         if not gid or not uid:
-            return
+            return False
         ban_duration = duration if duration is not None else self._cfg_int("moderation_ban_duration", 1800, group_id=group_id)
         try:
-            await asyncio.wait_for(client.call_action('set_group_ban', group_id=gid, user_id=uid, duration=ban_duration), timeout=ONEBOT_CALL_TIMEOUT)
+            result = await asyncio.wait_for(
+                client.call_action(
+                    'set_group_ban', group_id=gid, user_id=uid,
+                    duration=ban_duration,
+                ),
+                timeout=ONEBOT_CALL_TIMEOUT,
+            )
+            ok, error = self._check_api_result(result, "禁言")
+            if not ok:
+                logger.warning(f"[GroupMgr] 禁言失败: {error}")
+                return False
+            return True
         except Exception as e:
             logger.warning(f"[GroupMgr] 禁言失败: {e}")
+            return False
 
     async def _unban_member(self, group_id, user_id, event: AstrMessageEvent = None) -> bool:
         # 解除某群成员禁言（set_group_ban duration=0）。用于定时解禁、申诉通过等场景。

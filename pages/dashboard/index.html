@@ -1184,7 +1184,7 @@ async function loadCardMonConfig() {
   var box = $('#cardMonConfig');
   var res = await safeGet('card_monitor/config');
   if (isApiError(res)) { box.innerHTML = '<p class="empty">' + esc(res.message) + '</p>'; return; }
-  var order = ['card_monitor_enabled','card_sync_enabled','card_sync_interval','card_log_enabled','card_protect_enabled','card_audit_link_only','card_audit_enabled','card_audit_llm_always','admin_change_notify_enabled','card_monitor_notify'];
+  var order = ['card_monitor_enabled','card_sync_enabled','card_sync_interval','card_log_enabled','card_protect_enabled','card_audit_link_only','card_audit_enabled','card_audit_admin_exempt','card_audit_llm_always','admin_change_notify_enabled','card_monitor_notify'];
   var html = order.map(function(k) {
     var it = res[k]; if (!it) return '';
     var control;
@@ -1801,6 +1801,7 @@ var AUDIT_TOGGLES = [
   { key: 'scan_swear', label: '脏话检测', desc: '使用正则检测脏话' },
   { key: 'scan_ad', label: '广告检测', desc: '使用正则检测广告' },
   { key: 'llm_moderation_enabled', label: 'AI审核', desc: '使用LLM进行深度审核' },
+  { key: 'llm_moderation_always', label: '全量 AI 审核', desc: '所有消息带上下文送 LLM，并自动尝试识图和二维码解析' },
   { key: 'llm_moderation_ban', label: 'AI审核后禁言', desc: 'AI判定违规后自动禁言' },
   { key: 'prompt_injection_enabled', label: '群管提示词注入', desc: '向LLM追加本轮群管权限规则' },
   { key: 'scan_forward_msg', label: '合并转发审核', desc: '解析合并转发消息内容进行审核' },
@@ -1911,6 +1912,7 @@ var MANUAL_SETTING_KEYS = {
   scan_swear: true,
   scan_ad: true,
   llm_moderation_enabled: true,
+  llm_moderation_always: true,
   llm_moderation_ban: true,
   prompt_injection_enabled: true,
   scan_forward_msg: true,

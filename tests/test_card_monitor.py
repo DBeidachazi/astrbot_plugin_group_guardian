@@ -174,6 +174,7 @@ class _CardHarness(card_monitor.CardMonitorMixin):
             "card_protect_enabled": False,
             "card_audit_link_only": False,
             "card_audit_enabled": False,
+            "card_audit_admin_exempt": True,
         }
         if group_id is not None and (str(group_id), key) in self.group_cfg_values:
             return self.group_cfg_values[(str(group_id), key)]
@@ -270,6 +271,46 @@ class _CardLlmHarness(_CardHarness):
         if not isinstance(value, bool):
             return {"violation": False, "fallback": True}
         return {"violation": value, "fallback": False}
+
+
+class _CardAuditAdminHarness(_CardHarness):
+    def __init__(
+        self, client=None, roles=None, admin_ids=None, protected=False,
+        admin_exempt=True,
+    ):
+        super().__init__(client)
+        self.roles = dict(roles or {})
+        self.admin_ids = {str(value) for value in (admin_ids or set())}
+        self.protected = protected
+        self.admin_exempt = admin_exempt
+        self.role_calls = []
+        self.restores = []
+        if protected:
+            self._storage = _ProtectedStorage()
+
+    def _cfg(self, key, default=True, group_id=None):
+        values = {
+            "card_audit_link_only": True,
+            "card_audit_admin_exempt": self.admin_exempt,
+            "card_log_enabled": True,
+            "card_monitor_notify": False,
+            "card_protect_enabled": self.protected,
+        }
+        if key in values:
+            return values[key]
+        return super()._cfg(key, default, group_id)
+
+    def _get_all_admin_ids(self):
+        return set(self.admin_ids)
+
+    async def _get_member_role(self, event, group_id, user_id):
+        key = (str(group_id), str(user_id))
+        self.role_calls.append(key)
+        return self.roles.get(key, "member")
+
+    async def _restore_card(self, group_id, user_id, card):
+        self.restores.append((group_id, user_id, card))
+        return True
 
 
 class CardMonitorTests(unittest.TestCase):
@@ -598,6 +639,101 @@ class CardMonitorTests(unittest.TestCase):
 
         self.assertTrue(hit_result)
         self.assertFalse(no_hit_result)
+
+    def test_sync_reuses_owner_role_for_card_audit_exemption(self):
+        client = _Client(
+            {"data": [{"group_id": 100}]},
+            {"data": [{
+                "user_id": 200,
+                "card": "https://new.example",
+                "nickname": "owner",
+                "role": "owner",
+            }]},
+        )
+        harness = _CardAuditAdminHarness(client)
+        harness._card_snapshots = {"100": {"200": "old-card"}}
+
+        changed = asyncio.run(harness._sync_group_cards())
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(harness.restores, [])
+        self.assertEqual(harness.role_calls, [])
+        self.assertEqual(harness._card_snapshots["100"]["200"], "https://new.example")
+        self.assertEqual(harness.logged[0][-1], "记录")
+
+    def test_event_queries_group_admin_role_for_card_audit_exemption(self):
+        harness = _CardAuditAdminHarness(roles={("100", "201"): "admin"})
+
+        restored = asyncio.run(
+            harness._process_card_values(
+                "100", "201", "old-card", "https://new.example", source="event"
+            )
+        )
+
+        self.assertFalse(restored)
+        self.assertEqual(harness.restores, [])
+        self.assertEqual(harness.role_calls, [("100", "201")])
+        self.assertEqual(harness.logged[0][-1], "记录")
+
+    def test_plugin_admin_is_exempt_without_role_lookup(self):
+        harness = _CardAuditAdminHarness(admin_ids={"202"})
+
+        restored = asyncio.run(
+            harness._process_card_values(
+                "100", "202", "old-card", "https://new.example", source="event"
+            )
+        )
+
+        self.assertFalse(restored)
+        self.assertEqual(harness.restores, [])
+        self.assertEqual(harness.role_calls, [])
+        self.assertEqual(harness.logged[0][-1], "记录")
+
+    def test_ordinary_member_is_still_audited(self):
+        harness = _CardAuditAdminHarness()
+
+        restored = asyncio.run(
+            harness._process_card_values(
+                "100", "203", "old-card", "https://new.example",
+                source="sync", member_role="member",
+            )
+        )
+
+        self.assertTrue(restored)
+        self.assertEqual(harness.restores, [("100", "203", "old-card")])
+        self.assertEqual(harness.role_calls, [])
+        self.assertEqual(harness.logged[0][-1], "违规还原")
+
+    def test_admin_exemption_can_be_disabled(self):
+        harness = _CardAuditAdminHarness(admin_exempt=False)
+
+        restored = asyncio.run(
+            harness._process_card_values(
+                "100", "204", "old-card", "https://new.example",
+                source="sync", member_role="owner",
+            )
+        )
+
+        self.assertTrue(restored)
+        self.assertEqual(harness.restores, [("100", "204", "old-card")])
+        self.assertEqual(harness.role_calls, [])
+        self.assertEqual(harness.logged[0][-1], "违规还原")
+
+    def test_protected_admin_card_is_still_forcibly_restored(self):
+        harness = _CardAuditAdminHarness(admin_ids={"200"}, protected=True)
+
+        restored = asyncio.run(
+            harness._process_card_values(
+                "100", "200", "old-card", "https://new.example",
+                source="sync", member_role="owner",
+            )
+        )
+
+        self.assertTrue(restored)
+        self.assertEqual(harness.restores, [("100", "200", "required-card")])
+        self.assertEqual(harness.role_calls, [])
+        self.assertEqual(harness.logged[0][-1], "保护还原")
+        self.assertEqual(harness._card_snapshots["100"]["200"], "required-card")
 
 
 class _SchedulerStorage:

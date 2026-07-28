@@ -66,6 +66,15 @@ class AntiFloodMixin:
         if group_q and user_id in group_q:
             group_q[user_id].clear()
 
+    def _clear_anti_flood_penalty(self, group_id: str, user_id: str) -> None:
+        """禁言未生效时释放冷却，允许后续消息重新触发处罚。"""
+        users = self._anti_flood_penalty_until.get(group_id)
+        if not users:
+            return
+        users.pop(user_id, None)
+        if not users:
+            self._anti_flood_penalty_until.pop(group_id, None)
+
     def _normalize_message_text(self, text: str) -> str:
         """归一化消息文本，便于重复消息检测。"""
         s = (text or "").strip().lower()

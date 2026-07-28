@@ -45,6 +45,7 @@ _PROMO_SUSPECT_RE = re.compile(
 
 _CARD_SNAPSHOT_UNSET = object()
 _CARD_SNAPSHOT_ANY = object()
+_CARD_ROLE_UNSET = object()
 _CARD_PENDING_MAX_MISSES = 3
 
 
@@ -161,6 +162,40 @@ class CardMonitorMixin:
         logger.debug(f"[GroupMgr] 查询成员名片失败({group_id}/{user_id}): {last_error}")
         return None
 
+    async def _is_card_audit_admin_exempt(
+        self,
+        group_id: str,
+        user_id: str,
+        event: AstrMessageEvent = None,
+        member_role=_CARD_ROLE_UNSET,
+    ) -> bool:
+        """判断成员是否只豁免违规名片审核，不影响保护、日志和快照。"""
+        if not self._cfg("card_audit_admin_exempt", True, group_id=group_id):
+            return False
+
+        try:
+            get_admin_ids = getattr(self, "_get_all_admin_ids", None)
+            admin_ids = get_admin_ids() if callable(get_admin_ids) else set()
+            if str(user_id) in {str(value) for value in (admin_ids or set())}:
+                return True
+        except Exception as e:
+            logger.debug(f"[GroupMgr] 读取名片审核管理员豁免名单失败: {e}")
+
+        role = member_role
+        if role is _CARD_ROLE_UNSET:
+            try:
+                get_role = getattr(self, "_get_member_role", None)
+                role = (
+                    await get_role(event, group_id, user_id)
+                    if callable(get_role) else ""
+                )
+            except Exception as e:
+                logger.debug(
+                    f"[GroupMgr] 查询名片审核成员角色失败({group_id}/{user_id}): {e}"
+                )
+                role = ""
+        return str(role or "").lower() in ("admin", "owner")
+
     async def _process_card_values(
         self,
         group_id: str,
@@ -172,6 +207,7 @@ class CardMonitorMixin:
         source: str = "event",
         force: bool = False,
         expected_snapshot=_CARD_SNAPSHOT_ANY,
+        member_role=_CARD_ROLE_UNSET,
     ) -> bool:
         """统一处理事件、入群即时查询和周期快照发现的名片变化。
 
@@ -259,7 +295,17 @@ class CardMonitorMixin:
             # C 违规名片审核。两档模式：链接直接拦，其余严格模式走初筛+LLM。
             link_only = self._cfg("card_audit_link_only", False, group_id=group_id)
             full_audit = self._cfg("card_audit_enabled", False, group_id=group_id)
+            audit_exempt = False
             if not restored and not protection_failed and (link_only or full_audit):
+                audit_exempt = await self._is_card_audit_admin_exempt(
+                    group_id, user_id, event=event, member_role=member_role
+                )
+                if audit_exempt:
+                    logger.debug(
+                        f"[GroupMgr] 管理员豁免违规名片审核({group_id}/{user_id})"
+                    )
+            if (not restored and not protection_failed
+                    and (link_only or full_audit) and not audit_exempt):
                 is_violation = False
                 reason = ""
                 if self._is_shop_link_card(card_new):
@@ -456,7 +502,8 @@ class CardMonitorMixin:
         #   改名片后日志无此行 => 协议端根本没上报 group_card 事件（NapCat 配置/版本问题）
         #   有此行但无后续动作 => 开关未生效或判定逻辑问题
         return await self._process_card_values(
-            group_id, user_id, card_old, card_new, event=event, source="event"
+            group_id, user_id, card_old, card_new, event=event, source="event",
+            member_role=raw.get("role", _CARD_ROLE_UNSET),
         )
 
     async def _handle_group_increase(self, event: AstrMessageEvent) -> bool:
@@ -490,6 +537,7 @@ class CardMonitorMixin:
         restored = await self._process_card_values(
             group_id, user_id, "", card_new, user_name=user_name,
             event=event, source="join", force=True,
+            member_role=raw.get("role", _CARD_ROLE_UNSET),
         )
         self._ensure_card_sync_state()
         self._clear_card_pending(group_id, user_id)
@@ -630,6 +678,7 @@ class CardMonitorMixin:
                         user_name=user_name, source="sync",
                         force=(pending or protection_needed),
                         expected_snapshot=baseline,
+                        member_role=member.get("role", _CARD_ROLE_UNSET),
                     ):
                         changed += 1
                     # _process_card_values 会把还原后的有效值写入快照。

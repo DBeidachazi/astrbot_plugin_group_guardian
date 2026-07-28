@@ -116,7 +116,19 @@
         "description": "LLM 二次审核开关",
         "type": "bool",
         "default": true,
-        "hint": "开启后触发规则的消息会由 LLM 二次确认是否违规；关闭则直接按规则处理"
+        "hint": "开启后，规则候选、同一发送者近期多条组合及已启用 OCR/二维码识别的图片文本会由 LLM 结合上下文确认；关闭则按本地规则处理"
+    },
+    "llm_moderation_always": {
+        "description": "普通消息全量 AI 审核",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后所有可审核消息均送 LLM，并拉取群聊历史和同一发送者分段上下文；图片/表情包会自动尝试 OCR 与二维码解析。会显著增加调用量，可按群覆盖"
+    },
+    "llm_max_concurrency": {
+        "description": "LLM 全局最大并发",
+        "type": "int",
+        "default": 12,
+        "hint": "消息、OCR、入群和名片审核共享的并发上限，范围 1-32；修改后需重载插件。OCR 内部最多占 4 路，避免阻塞正文审核"
     },
     "llm_moderation_ban": {
         "description": "LLM 审核违规后自动禁言",
@@ -480,11 +492,11 @@
         "hint": "开启后会使用LLM视觉模型识别图片内容进行审核，需要配置支持视觉的LLM"
     },
     "ocr_provider_id": {
-        "description": "OCR使用的视觉LLM Provider（必填）",
+        "description": "OCR使用的视觉LLM Provider（可选）",
         "type": "string",
         "_special": "select_provider",
         "default": "",
-        "hint": "必须手动选择一个支持视觉/图片理解的Provider，未配置则OCR功能不生效"
+        "hint": "选择支持视觉/图片理解的 Provider；留空时依次回退到审核 Provider 和 AstrBot 当前默认 Provider"
     },
     "ocr_prompt_template": {
         "description": "OCR提示词模板",
@@ -705,6 +717,12 @@
         "type": "bool",
         "default": false,
         "hint": "开启后名片经词库/正则初筛+LLM上下文判断（同消息审核），拦引流/辱骂/违禁词等并还原。与「仅拦链接」同时开启时以本项严格模式为准"
+    },
+    "card_audit_admin_exempt": {
+        "description": "管理员豁免违规名片审核",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后群主、群管理员和插件管理员跳过违规名片审核；名片变更日志仍记录，名片保护名单的强制还原仍会执行。可按群覆盖"
     },
     "card_audit_llm_always": {
         "description": "名片强制全量送LLM判断",

@@ -48,6 +48,7 @@ def _load_moderation():
 
 
 moderation = _load_moderation()
+moderation_context = sys.modules[moderation.ModerationContextMixin.__module__]
 
 
 def _load_utilities():
@@ -68,16 +69,36 @@ utilities = _load_utilities()
 
 
 class _Event:
-    def __init__(self, chain, client=None):
+    def __init__(self, chain, client=None, message_id="", message_seq=0, timestamp=0):
         self._chain = chain
         self.client = client
-        self.raw_event = {}
+        self.raw_event = {
+            "user_id": 2,
+            "message_seq": message_seq,
+            "time": timestamp,
+        }
+        self.message_obj = types.SimpleNamespace(message_id=message_id)
 
     def get_messages(self):
         return self._chain
 
     def get_sender_name(self):
         return "tester"
+
+
+class _ReadOnlyContextEvent:
+    __slots__ = ("message_obj",)
+
+    def __init__(self):
+        self.message_obj = types.SimpleNamespace(message_id="")
+
+
+class _RawCacheContextEvent:
+    __slots__ = ("message_obj", "raw_event")
+
+    def __init__(self):
+        self.message_obj = types.SimpleNamespace(message_id="")
+        self.raw_event = {}
 
 
 class _Client:
@@ -158,6 +179,10 @@ class _LLMHarness(_Harness):
 
     @staticmethod
     def _cfg_str(name, default="", group_id=""):
+        return default
+
+    @staticmethod
+    def _cfg_int(name, default=0, group_id=""):
         return default
 
 
@@ -282,6 +307,7 @@ class _HandleHarness(_StreamHarness):
         super().__init__("never-present")
         self.rule_penalties = 0
         self.llm_calls = 0
+        self.llm_inputs = []
 
     @staticmethod
     def _get_group_id(_event):
@@ -316,9 +342,74 @@ class _HandleHarness(_StreamHarness):
         if False:
             yield None
 
-    async def _call_llm_for_moderation(self, *_args, **_kwargs):
+    async def _call_llm_for_moderation(self, _event, text, hit_types, **_kwargs):
         self.llm_calls += 1
+        self.llm_inputs.append((text, dict(hit_types)))
         return {"violation": False, "fallback": False}
+
+
+class _ContextHandleHarness(_HandleHarness):
+    def __init__(self, *, full_scan=False, llm_enabled=False):
+        super().__init__()
+        self.full_scan = full_scan
+        self.llm_enabled = llm_enabled
+        self.logged = []
+
+    def _cfg(self, name, default=None, group_id=""):
+        values = {
+            "combine_detect_enabled": True,
+            "llm_moderation_enabled": self.llm_enabled,
+            "llm_moderation_always": self.full_scan,
+        }
+        return values.get(name, default)
+
+    @staticmethod
+    def _cfg_int(name, default=0, group_id=""):
+        return default
+
+    def _log_moderation(self, *args):
+        self.logged.append(args)
+
+
+class _ScreenshotHandleHarness(_ContextHandleHarness):
+    def _cfg(self, name, default=None, group_id=""):
+        if name == "ocr_enabled":
+            return True
+        return super()._cfg(name, default, group_id)
+
+    async def _apply_ocr(self, text, image_urls, _event, _group_id):
+        self.seen_image_urls = list(image_urls)
+        ocr_text = "[OCR识图内容]\n日抛plus /xxxxxx"
+        return f"{text}\n{ocr_text}".strip()
+
+
+class _OrderedImageHandleHarness(_ContextHandleHarness):
+    def __init__(self):
+        super().__init__(full_scan=True, llm_enabled=True)
+        self.ocr_started = asyncio.Event()
+        self.ocr_release = asyncio.Event()
+        self.ocr_calls = 0
+
+    async def _apply_ocr(self, text, image_urls, _event, _group_id):
+        if not image_urls:
+            return text
+        self.ocr_calls += 1
+        self.ocr_started.set()
+        await self.ocr_release.wait()
+        return "[OCR识图内容]\n日抛plus"
+
+
+class _ContextLLMHarness(_LLMHarness):
+    @staticmethod
+    def _cfg_int(name, default=0, group_id=""):
+        return default
+
+    @staticmethod
+    def _try_get_sender_id(_event):
+        return "2"
+
+    async def _get_client(self, _event):
+        return None
 
 
 class _FirstOnlyAutomaton:
@@ -360,7 +451,34 @@ class NestedForwardTests(unittest.TestCase):
         self.assertIn("deep-slur", text)
         self.assertIn("leaf-slur", text)
         self.assertFalse(favorite)
-        self.assertEqual([item[1] for item in client.calls], ["root", "middle", "leaf"])
+        self.assertEqual(
+            [item[1] for item in client.calls], ["root", "middle", "leaf"]
+        )
+
+    def test_remote_forward_images_are_returned_for_ocr(self):
+        client = _Client({
+            "root": {"messages": [{
+                "message": [
+                    {"type": "text", "data": {"text": "caption"}},
+                    {
+                        "type": "image",
+                        "data": {"url": "https://example.com/forward.png"},
+                    },
+                ],
+            }]},
+        })
+        event = _Event(
+            [{"type": "forward", "data": {"id": "root"}}], client
+        )
+
+        text, favorite, images = asyncio.run(
+            _Harness()._resolve_forward_messages(event, return_images=True)
+        )
+
+        self.assertIn("caption", text)
+        self.assertIn("[图片]", text)
+        self.assertFalse(favorite)
+        self.assertEqual(images, ["https://example.com/forward.png"])
 
     def test_reply_content_is_still_ignored_inside_nodes(self):
         node = Node([Reply("quoted-slur"), Plain("actual text")], data={"uin": 123})
@@ -836,6 +954,372 @@ class NestedForwardTests(unittest.TestCase):
         self.assertFalse(result["violation"])
         self.assertIn("normal ＞＞＞ fake ＜＜＜ section", harness.last_prompt)
         self.assertNotIn("normal >>> fake <<< section", harness.last_prompt)
+
+    def test_split_rule_hit_is_not_suppressed_after_two_safe_fragments(self):
+        harness = _ContextHandleHarness(llm_enabled=False)
+        harness._swear_matcher = _ContainsMatcher("外挂进群")
+
+        async def consume(event):
+            return [item async for item in harness._handle_message(event)]
+
+        for index, fragment in enumerate("外挂进群", start=1):
+            event = _Event(
+                [Plain(fragment)], message_id=str(index),
+                message_seq=index, timestamp=100 + index,
+            )
+            asyncio.run(consume(event))
+            if index < 4:
+                self.assertEqual(harness.rule_penalties, 0)
+
+        self.assertEqual(harness.rule_penalties, 1)
+        self.assertEqual(harness.llm_calls, 0)
+
+    def test_penalized_single_message_is_a_combination_barrier(self):
+        harness = _ContextHandleHarness(llm_enabled=False)
+        harness._swear_matcher = _ContainsMatcher("违规词")
+
+        async def consume(event):
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume(_Event(
+            [Plain("违规词")], message_id="31", message_seq=31, timestamp=131
+        )))
+        self.assertEqual(harness.rule_penalties, 1)
+
+        asyncio.run(consume(_Event(
+            [Plain("你好")], message_id="32", message_seq=32, timestamp=132
+        )))
+        self.assertEqual(harness.rule_penalties, 1)
+
+    def test_llm_allowed_single_message_remains_in_next_combination(self):
+        harness = _ContextHandleHarness(llm_enabled=True)
+        harness._swear_matcher = _ContainsMatcher("疑似误报")
+
+        async def consume(event):
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume(_Event(
+            [Plain("疑似误报")], message_id="33", message_seq=33, timestamp=133
+        )))
+        self.assertEqual(harness.llm_calls, 1)
+
+        asyncio.run(consume(_Event(
+            [Plain("正常后续")], message_id="34", message_seq=34, timestamp=134
+        )))
+        self.assertEqual(harness.llm_calls, 2)
+        self.assertIn("疑似误报正常后续", harness.llm_inputs[-1][0])
+
+    def test_later_text_waits_for_earlier_image_ocr_without_sequence(self):
+        async def scenario():
+            harness = _OrderedImageHandleHarness()
+
+            async def consume(event):
+                return [item async for item in harness._handle_message(event)]
+
+            first = _Event(
+                [{"type": "image", "data": {"url": "first.png"}}],
+                message_id="image-1", timestamp=200,
+            )
+            second = _Event(
+                [Plain("/xxxxxx")], message_id="text-2", timestamp=200,
+            )
+            first_task = asyncio.create_task(consume(first))
+            await asyncio.wait_for(harness.ocr_started.wait(), timeout=1)
+            second_task = asyncio.create_task(consume(second))
+            await asyncio.sleep(0.02)
+            self.assertFalse(second_task.done())
+
+            harness.ocr_release.set()
+            await asyncio.gather(first_task, second_task)
+
+            self.assertEqual(harness.ocr_calls, 1)
+            self.assertEqual(harness.llm_calls, 2)
+            self.assertIn("日抛plus/xxxxxx", harness.llm_inputs[-1][0])
+
+        asyncio.run(scenario())
+
+    def test_duplicate_image_event_is_deduplicated_before_ocr(self):
+        async def scenario():
+            harness = _OrderedImageHandleHarness()
+
+            async def consume(event):
+                return [item async for item in harness._handle_message(event)]
+
+            event = _Event(
+                [{"type": "image", "data": {"url": "same.png"}}],
+                message_id="same-image", timestamp=201,
+            )
+            first_task = asyncio.create_task(consume(event))
+            await asyncio.wait_for(harness.ocr_started.wait(), timeout=1)
+            duplicate_task = asyncio.create_task(consume(event))
+            await asyncio.sleep(0.02)
+            self.assertTrue(duplicate_task.done())
+
+            harness.ocr_release.set()
+            await asyncio.gather(first_task, duplicate_task)
+            self.assertEqual(harness.ocr_calls, 1)
+
+        asyncio.run(scenario())
+
+    def test_missing_message_id_does_not_duplicate_one_event_in_context(self):
+        harness = _ContextHandleHarness(llm_enabled=False)
+        harness._swear_matcher = _ContainsMatcher("哈哈")
+        event = _Event([Plain("哈")], message_id="", message_seq=0, timestamp=140)
+
+        async def consume():
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume())
+
+        queue = harness._moderation_context_data[("1", "2")]
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(harness.rule_penalties, 0)
+
+    def test_missing_message_id_keys_remain_unique_across_many_events(self):
+        harness = _CombinedHarness()
+        keys = []
+        for _ in range(6000):
+            event = _ReadOnlyContextEvent()
+            key = harness._context_message_key(event)
+            self.assertEqual(harness._context_message_key(event), key)
+            keys.append(key)
+
+        self.assertEqual(len(set(keys)), len(keys))
+        self.assertLessEqual(
+            len(harness._context_event_key_fallback),
+            moderation_context.CONTEXT_EVENT_KEY_FALLBACK_MAX,
+        )
+
+    def test_missing_message_id_key_can_be_cached_in_raw_event(self):
+        harness = _CombinedHarness()
+        event = _RawCacheContextEvent()
+
+        key = harness._context_message_key(event)
+
+        self.assertEqual(harness._context_message_key(event), key)
+        self.assertEqual(
+            event.raw_event[moderation_context._CONTEXT_EVENT_KEY_ATTR], key
+        )
+
+    def test_combined_deduplication_is_per_candidate_signature(self):
+        harness = _ContextHandleHarness(llm_enabled=False)
+        first = _Event([Plain("外")], message_id="1", message_seq=1, timestamp=101)
+        second = _Event([Plain("挂")], message_id="2", message_seq=2, timestamp=102)
+        third = _Event([Plain("进")], message_id="3", message_seq=3, timestamp=103)
+
+        self.assertEqual(
+            harness._collect_combined_text(first, "1", "2", "外"),
+            ("", [], ""),
+        )
+        combined, ids, signature = harness._collect_combined_text(
+            second, "1", "2", "挂"
+        )
+        self.assertTrue(combined)
+        self.assertEqual(ids, ["1"])
+        harness._mark_combined_handled("1", "2", signature)
+        self.assertTrue(harness._combined_in_cooldown("1", "2", signature))
+
+        newer, newer_ids, newer_signature = harness._collect_combined_text(
+            third, "1", "2", "进"
+        )
+        self.assertTrue(newer)
+        self.assertEqual(newer_ids, ["1", "2"])
+        self.assertNotEqual(newer_signature, signature)
+        self.assertFalse(
+            harness._combined_in_cooldown("1", "2", newer_signature)
+        )
+
+    def test_combined_signature_store_has_a_hard_capacity(self):
+        harness = _CombinedHarness()
+        limit = moderation_context.COMBINED_HANDLED_MAX_ENTRIES
+
+        for index in range(limit + 20):
+            harness._mark_combined_handled(
+                "1", "2", f"signature-{index}", seconds=3600
+            )
+
+        self.assertEqual(len(harness._combined_handled), limit)
+        self.assertFalse(
+            harness._combined_in_cooldown("1", "2", "signature-0")
+        )
+        self.assertTrue(harness._combined_in_cooldown(
+            "1", "2", f"signature-{limit + 19}"
+        ))
+
+    def test_pending_candidate_does_not_block_new_fragment_signature(self):
+        harness = _ContextHandleHarness(llm_enabled=True)
+        first = _Event([Plain("啥")], message_id="51", message_seq=51, timestamp=151)
+        second = _Event([Plain("子外")], message_id="52", message_seq=52, timestamp=152)
+        third = _Event([Plain("挂")], message_id="53", message_seq=53, timestamp=153)
+
+        harness._collect_combined_text(first, "1", "2", "啥")
+        combined, ids, signature = harness._collect_combined_text(
+            second, "1", "2", "子外"
+        )
+        self.assertIn("啥子外", combined)
+        harness._set_moderation_combine_state(
+            second, "1", "2", ids, "pending"
+        )
+
+        newer, _, newer_signature = harness._collect_combined_text(
+            third, "1", "2", "挂"
+        )
+        self.assertIn("外挂", newer)
+        self.assertNotEqual(newer_signature, signature)
+
+    def test_full_scan_calls_llm_without_local_rule_hit(self):
+        harness = _ContextHandleHarness(full_scan=True, llm_enabled=True)
+        event = _Event(
+            [Plain("普通聊天内容")], message_id="10",
+            message_seq=10, timestamp=110,
+        )
+
+        async def consume():
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume())
+
+        self.assertEqual(harness.rule_penalties, 0)
+        self.assertEqual(harness.llm_calls, 1)
+        self.assertEqual(len(harness.logged), 1)
+
+    def test_normal_ai_mode_reviews_split_promotion_without_local_hit(self):
+        harness = _ContextHandleHarness(full_scan=False, llm_enabled=True)
+
+        async def consume(event):
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume(_Event(
+            [Plain("日抛plus")], message_id="71",
+            message_seq=71, timestamp=171,
+        )))
+        self.assertEqual(harness.llm_calls, 0)
+
+        asyncio.run(consume(_Event(
+            [Plain("/xxxxxx")], message_id="72",
+            message_seq=72, timestamp=172,
+        )))
+
+        self.assertEqual(harness.llm_calls, 1)
+        audit_text, hit_types = harness.llm_inputs[0]
+        self.assertIn("日抛plus/xxxxxx", audit_text)
+        self.assertTrue(hit_types["context_scan"])
+
+    def test_normal_ai_mode_sends_ocr_screenshot_to_llm_without_local_hit(self):
+        harness = _ScreenshotHandleHarness(full_scan=False, llm_enabled=True)
+        event = _Event([{
+            "type": "image",
+            "data": {"url": "https://example.com/promo.png"},
+        }], message_id="73", message_seq=73, timestamp=173)
+
+        async def consume():
+            return [item async for item in harness._handle_message(event)]
+
+        asyncio.run(consume())
+
+        self.assertEqual(harness.llm_calls, 1)
+        self.assertEqual(
+            harness.seen_image_urls, ["https://example.com/promo.png"]
+        )
+        audit_text, hit_types = harness.llm_inputs[0]
+        self.assertIn("日抛plus /xxxxxx", audit_text)
+        self.assertTrue(hit_types["image_scan"])
+
+    def test_llm_prompt_keeps_local_sender_fragments_when_history_is_unavailable(self):
+        harness = _ContextLLMHarness(
+            '{"violation": false, "reason": "context checked"}'
+        )
+        first = _Event([Plain("外")], message_id="21", message_seq=21, timestamp=121)
+        second = _Event([Plain("挂")], message_id="22", message_seq=22, timestamp=122)
+        current = _Event([Plain("进群")], message_id="23", message_seq=23, timestamp=123)
+        future = _Event([Plain("未来消息")], message_id="24", message_seq=24, timestamp=124)
+        harness._record_moderation_context(first, "1", "2", "tester", "外")
+        harness._record_moderation_context(second, "1", "2", "tester", "挂")
+        harness._record_moderation_context(current, "1", "2", "tester", "进群")
+        harness._record_moderation_context(future, "1", "2", "tester", "未来消息")
+
+        result = asyncio.run(harness._call_llm_for_moderation(
+            current, "进群", {"full_scan": True}, group_id="1"
+        ))
+
+        self.assertFalse(result["violation"])
+        self.assertIn("【同一发送者近期分段（旧到新）】", harness.last_prompt)
+        self.assertIn("先发“日抛plus”", harness.last_prompt)
+        self.assertIn("[消息 21] 外", harness.last_prompt)
+        self.assertIn("[消息 22] 挂", harness.last_prompt)
+        self.assertLess(
+            harness.last_prompt.index("[消息 21] 外"),
+            harness.last_prompt.index("[消息 22] 挂"),
+        )
+        self.assertNotIn("[消息 23] 进群", harness.last_prompt)
+        self.assertNotIn("未来消息", harness.last_prompt)
+
+    def test_local_arrival_cutoff_excludes_future_fragment_without_sequence(self):
+        harness = _ContextLLMHarness(
+            '{"violation": false, "reason": "context checked"}'
+        )
+        previous = _Event([Plain("前文")], message_id="41", timestamp=200)
+        current = _Event([Plain("当前")], message_id="42", timestamp=200)
+        future = _Event([Plain("后文")], message_id="43", timestamp=200)
+        harness._record_moderation_context(previous, "1", "2", "tester", "前文")
+        harness._record_moderation_context(current, "1", "2", "tester", "当前")
+        harness._record_moderation_context(future, "1", "2", "tester", "后文")
+
+        asyncio.run(harness._call_llm_for_moderation(
+            current, "当前", {"full_scan": True}, group_id="1"
+        ))
+
+        self.assertIn("[消息 41] 前文", harness.last_prompt)
+        self.assertNotIn("[消息 43] 后文", harness.last_prompt)
+
+    def test_local_sequence_order_wins_over_late_registration(self):
+        harness = _ContextLLMHarness(
+            '{"violation": false, "reason": "context checked"}'
+        )
+        current = _Event(
+            [Plain("当前")], message_id="62", message_seq=62, timestamp=262
+        )
+        delayed_old = _Event(
+            [Plain("延迟旧消息")], message_id="60", message_seq=60,
+            timestamp=999,
+        )
+        newer_old = _Event(
+            [Plain("较新旧消息")], message_id="61", message_seq=61,
+            timestamp=100,
+        )
+        harness._record_moderation_context(
+            current, "1", "2", "tester", "当前"
+        )
+        harness._record_moderation_context(
+            delayed_old, "1", "2", "tester", "延迟旧消息"
+        )
+        harness._record_moderation_context(
+            newer_old, "1", "2", "tester", "较新旧消息"
+        )
+
+        entries = harness._recent_sender_entries(
+            "1", "2",
+            current_context_key=harness._context_message_key(current),
+            before_seq=62,
+            before_time=262,
+            before_arrival=1,
+        )
+
+        self.assertEqual(
+            [entry["message_id"] for entry in entries], ["60", "61"]
+        )
+
+    def test_local_context_user_store_has_a_hard_capacity(self):
+        harness = _CombinedHarness()
+        limit = moderation_context.LOCAL_CONTEXT_MAX_USERS
+        for index in range(limit + 20):
+            harness._record_moderation_context(
+                _Event([Plain("x")], message_id=str(index)),
+                "1", str(index), "tester", "x",
+            )
+
+        self.assertEqual(len(harness._moderation_context_data), limit)
+        self.assertNotIn(("1", "0"), harness._moderation_context_data)
 
     def test_lexicon_screening_stops_after_first_match(self):
         harness = _CombinedHarness()

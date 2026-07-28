@@ -113,6 +113,7 @@ class WebMixin:
             "auto_unban_permanent_hours": (1, 8760),
             "combine_detect_count": (2, 20),
             "combine_detect_window_seconds": (5, 600),
+            "llm_max_concurrency": (1, 32),
             "kick_recall_count": (1, 50),
             "card_sync_interval": (30, 3600),
         }
@@ -1597,7 +1598,7 @@ class WebMixin:
     # 不可按群覆盖的全局项（名单类已迁 DB；provider/免责声明/暗色模式/提示词注入是全局语义）。
     _GROUP_CONFIG_EXCLUDE = {
         "disclaimer_agreed", "webui_dark_mode", "prompt_injection_enabled",
-        "moderation_llm_provider_id", "ocr_provider_id",
+        "moderation_llm_provider_id", "ocr_provider_id", "llm_max_concurrency",
         "join_accept_keywords", "join_reject_keywords",
         "auto_unban_scan_interval", "card_sync_interval",
         "group_admin_grant_enabled", "legacy_role_admin_enabled",
@@ -1623,6 +1624,8 @@ class WebMixin:
     _CONFIG_CATEGORIES = {
         "enabled": "基础开关", "auto_moderate_enabled": "基础开关", "auto_moderate_notice": "基础开关",
         "scan_swear": "审核规则", "scan_ad": "审核规则", "llm_moderation_enabled": "审核规则",
+        "llm_moderation_always": "审核规则",
+        "llm_max_concurrency": "审核规则",
         "llm_moderation_ban": "审核规则", "moderation_ban_duration": "审核规则", "ban_notice": "审核规则",
         "scan_forward_msg": "审核规则", "recall_qq_favorite_enabled": "审核规则",
         "ocr_enabled": "OCR", "ocr_prompt_template": "OCR",
@@ -1813,7 +1816,8 @@ class WebMixin:
         "card_monitor_enabled", "card_sync_enabled", "card_sync_interval",
         "card_log_enabled", "card_monitor_notify",
         "card_protect_enabled", "card_audit_link_only", "card_audit_enabled",
-        "card_audit_llm_always", "admin_change_notify_enabled",
+        "card_audit_admin_exempt", "card_audit_llm_always",
+        "admin_change_notify_enabled",
     ]
 
     async def _web_card_records(self):

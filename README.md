@@ -8,7 +8,7 @@
 
 AstrBot 综合群管理插件，集 **28项群管功能**、**AI智能审核**、**违禁词热更新** 与 **WebUI 管理面板** 于一体，让机器人成为真正的群聊守护者。
 
-> 当前版本：**v2.7.4** | 最低 AstrBot 版本：**>=4.24.2**
+> 当前版本：**v2.7.5** | 最低 AstrBot 版本：**>=4.24.2**
 
 ***
 
@@ -129,6 +129,8 @@ AI 可通过以下工具自动执行群管操作，无需手动输入指令：
 - SQLite 审核日志存储与 WebUI 迁移助手
 - 每个功能独立开关
 - 可指定审核专用LLM Provider
+- **全量 AI 审核**：可选将规则初筛未命中的普通消息也送 LLM，补充识别依赖语境或分段表达的内容（默认关闭，可按群覆盖）
+- **普通 AI 模式也防拆分绕过**：同一发送者近期多条消息形成组合后，即使本地关键词零命中，也会送 LLM 语义审核；已启用 OCR/二维码识别的截图结果同样不会在词库零命中时提前放行
 - **多层嵌套消息审核**：递归解析 `Node` / `Nodes` / `Forward` / `JSON` / `App`，并限制深度、节点、字符和远程请求数量
 - **辱骂规避写法**：内置 24,000 条安全分隔变体及 13 条短词边界规则；`cs` / `cnm` / `nmsl` 等不会命中正常英文子串
 - **OCR识图审核**：使用LLM视觉模型识别图片内容，支持3种内置提示词模板（通用识别/严格审核/纯文字转录）和自定义提示词
@@ -159,11 +161,14 @@ WebUI 有**独立的「名片监控」页面**。名片监控总开关**默认�
 | **B 名片保护** | `card_protect_enabled` | 保护名单内成员的名片被改后自动改回预设值，名单在 WebUI 维护 |
 | **C 仅拦链接（宽松）** | `card_audit_link_only` | 只拦网址/店铺域名/扫码，**放行**「科技加我」「xxxrxxx」这类引流昵称 |
 | **C 全量审核（严格）** | `card_audit_enabled` | 链接照拦，另外引流/违禁词经「正则初筛 + LLM 上下文判断」也拦 |
+| **C 管理员豁免** | `card_audit_admin_exempt` | 群主、群管理员、插件管理员默认跳过违规名片审核；变更日志照常记录，名片保护仍执行 |
 | **C 强制送 LLM** | `card_audit_llm_always` | 初筛没命中也送 LLM，用于识别 `ldxp`/`catfk` 这类无规律引流缩写黑话（成本高） |
 | **D 管理员任免通知** | `admin_change_notify_enabled` | 有人被设为/取消管理员时群内通知 |
 | 还原时群内通知 | `card_monitor_notify` | 触发保护还原/违规还原时是否发通知 |
 
 **违规名片判定流程**（与消息审核同款的「正则初筛 + LLM 二判」）：
+
+名片保护名单会先独立执行；管理员豁免只跳过下方的违规审核，不跳过保护还原。
 
 ```
 名片变更
@@ -221,10 +226,12 @@ WebUI 有**独立的「名片监控」页面**。名片监控总开关**默认�
 | `auto_moderate_enabled`      | 自动审核开关                | `true`     |
 | `auto_moderate_notice`       | 撤回后发送说明               | `true`     |
 | `moderation_llm_provider_id` | 审核专用LLM Provider ID   | 默认         |
+| `llm_moderation_always`    | 所有消息全量 AI 审核，带群聊/分段上下文并自动尝试识图（可按群覆盖） | `false`    |
+| `llm_max_concurrency`      | LLM 全局并发上限（OCR 最多占 4 路，修改后重载） | `12`       |
 | `llm_moderation_custom_prompt` | 消息 LLM 自定义审核标准（留空使用内置） | 空 |
 | `scan_forward_msg`           | 合并转发消息审核开关            | `true`     |
 | `ocr_enabled`                | OCR识图审核开关             | `false`    |
-| `ocr_provider_id`            | OCR视觉LLM Provider（必填） | 空(未配置则不生效) |
+| `ocr_provider_id`            | OCR视觉LLM Provider（可留空回退审核/默认 Provider） | 空 |
 | `ocr_prompt_template`        | OCR提示词模板              | `default`  |
 | `ocr_custom_system_prompt`   | OCR自定义系统提示词           | 空          |
 | `ocr_custom_user_prompt`     | OCR自定义用户提示词           | 空          |
@@ -243,7 +250,7 @@ WebUI 有**独立的「名片监控」页面**。名片监控总开关**默认�
 | `join_llm_custom_prompt`     | 入群 LLM 自定义审核标准        | 空 |
 | `join_accept_overrides_lexicon` | 通过词优先于通用词库（拒绝词仍最优先） | `true` |
 | `appeal_enabled`             | 刷屏申诉模式开关              | `false`    |
-| `auto_unban_enabled`         | 定时自动解禁开关              | `true`     |
+| `auto_unban_enabled`         | 定时自动解禁开关              | `false`    |
 | `auto_moderate_notice`       | 撤回提示开关（自动审核撤回后是否发群内说明） | `true`     |
 | `recall_reply_notice`        | `/回复撤回` 成功后是否回复确认      | `true`     |
 | `card_monitor_enabled`       | 名片监控总开关（见「名片监控」章节）     | `false`    |
@@ -253,6 +260,7 @@ WebUI 有**独立的「名片监控」页面**。名片监控总开关**默认�
 | `card_protect_enabled`       | 名片保护/自动还原              | `false`    |
 | `card_audit_link_only`       | 名片仅拦链接/店铺（宽松，放行引流昵称）   | `false`    |
 | `card_audit_enabled`         | 违规名片全量审核（词库+LLM上下文）    | `false`    |
+| `card_audit_admin_exempt`    | 群主/群管理员/插件管理员豁免违规名片审核；名片保护仍执行 | `true` |
 | `card_audit_llm_always`      | 名片强制全量送 LLM（识别引流缩写黑话）  | `false`    |
 | `admin_change_notify_enabled` | 管理员任免群内通知             | `false`    |
 | `lexicon_*_enabled`          | 各类词库独立开关              | `true`     |
