@@ -218,7 +218,11 @@ class KeywordAutomaton:
             return results
         text_lower = text.lower()
         try:
-            return list(self._auto.iter(text_lower))
+            results = list(self._auto.iter(text_lower))
+            # pyahocorasick 对同一结束位置的输出顺序不稳定；与 Trie
+            # 降级路径统一排序，避免安装可选依赖后改变公开方法的结果。
+            results.sort(key=lambda item: (item[0], item[1]))
+            return results
         except StopIteration:
             return []
 
