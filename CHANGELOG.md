@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.7.4 - 2026-07-28
+
+### 修复：Gemini 批量群管工具参数错误（Issue #62）
+
+- 将批量禁言和批量踢人的 `user_ids` 工具参数声明由无元素类型的 `array` 修正为 AstrBot 支持的 `list[string]`，生成的 JSON Schema 现在包含 `items: {"type": "string"}`，修复 Gemini 在调用前返回 HTTP 400 的问题。
+- 同步注册入口的 `List[str]` 类型注解和业务 Mixin 文档；运行时继续兼容历史字符串参数。
+- 增加批量工具 Schema 合约测试并接入 CI，防止后续修改再次生成缺少 `items` 的数组声明。
+
 ## v2.7.3 - 2026-07-23
 
 ### 修复：多层嵌套消息漏审

@@ -4,13 +4,14 @@ import os
 import re
 import time
 from datetime import datetime
+from typing import List, Union
 
 from astrbot.api.event import AstrMessageEvent
 
 
 class LlmToolsMixin:
-    # LLM Tool 同样使用 async generator 模式。AstrBot 会根据函数签名的 event 后的参数自动生成 Tool 的 parameters schema。
-    # docstring 中的 Args 格式很重要：参数名(类型): 描述，会被 AstrBot 解析为工具的输入参数定义。
+    # LLM Tool 同样使用 async generator 模式。AstrBot 根据 docstring 的 Args 段生成 Tool 的 parameters schema。
+    # 函数类型注解用于开发期约束；docstring 必须使用“参数名(类型): 描述”的框架语法并与其保持一致。
     # _check_admin_cfg_access 同时检查功能开关和当前用户是否为插件/群管理员，保证工具不会被未授权用户调用。
     #
     # 通用模式（每个工具遵循以下步骤）：
@@ -500,11 +501,11 @@ class LlmToolsMixin:
         except Exception as e:
             yield event.plain_result(f"上传失败: {e}")
 
-    async def batch_ban_members_tool(self, event: AstrMessageEvent, user_ids, duration_minutes: int = 10):
+    async def batch_ban_members_tool(self, event: AstrMessageEvent, user_ids: Union[List[str], str], duration_minutes: int = 10):
         '''批量禁言多个群成员。当用户要求同时禁言多人时使用此工具。
 
         Args:
-            user_ids(array): 要禁言的用户QQ号列表
+            user_ids(list[string]): 要禁言的用户QQ号列表
             duration_minutes(number): 禁言时长（分钟），默认10分钟
         '''
         try:
@@ -538,11 +539,11 @@ class LlmToolsMixin:
         except Exception as e:
             yield event.plain_result(f"批量禁言失败: {e}")
 
-    async def batch_kick_members_tool(self, event: AstrMessageEvent, user_ids):
+    async def batch_kick_members_tool(self, event: AstrMessageEvent, user_ids: Union[List[str], str]):
         '''批量踢出多个群成员。当用户要求同时踢出多人时使用此工具。
 
         Args:
-            user_ids(array): 要踢出的用户QQ号列表
+            user_ids(list[string]): 要踢出的用户QQ号列表
         '''
         try:
             ok, err, client, gid = await self._prepare_group_action(event, "kick_enabled", "批量踢人")

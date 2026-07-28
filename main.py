@@ -2,7 +2,7 @@
 import asyncio
 import time
 from collections import deque
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -706,22 +706,22 @@ class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMo
 
     # F4 批量管理 LLM 工具
     @filter.llm_tool(name="batch_ban_members")
-    async def batch_ban_members_tool(self, event: AstrMessageEvent, user_ids: str, duration_minutes: int = 10):
+    async def batch_ban_members_tool(self, event: AstrMessageEvent, user_ids: List[str], duration_minutes: int = 10):
         '''批量禁言多个群成员。当用户要求同时禁言多人时使用此工具。
 
         Args:
-            user_ids(array): 要禁言的用户QQ号列表
+            user_ids(list[string]): 要禁言的用户QQ号列表
             duration_minutes(number): 禁言时长（分钟），默认10分钟
         '''
         async for item in LlmToolsMixin.batch_ban_members_tool(self, event, user_ids, duration_minutes):
             yield item
 
     @filter.llm_tool(name="batch_kick_members")
-    async def batch_kick_members_tool(self, event: AstrMessageEvent, user_ids: str):
+    async def batch_kick_members_tool(self, event: AstrMessageEvent, user_ids: List[str]):
         '''批量踢出多个群成员。当用户要求同时踢出多人时使用此工具。
 
         Args:
-            user_ids(array): 要踢出的用户QQ号列表
+            user_ids(list[string]): 要踢出的用户QQ号列表
         '''
         async for item in LlmToolsMixin.batch_kick_members_tool(self, event, user_ids):
             yield item
