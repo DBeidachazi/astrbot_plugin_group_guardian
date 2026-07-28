@@ -5,7 +5,7 @@
 - 多 Mixin 集中继承于 `Main` 类，继承列表需手动同步维护
 - **MRO 规则**：继承列表中**靠左的类优先级更高**（左高右低）
 - 引入新 Mixin 时，需强制检查 `Main` 类定义并更新继承列表
-- 依赖关系的 Mixin 应放在右侧（如 `CommandsMixin` 依赖 `UtilitiesMixin`，则 `UtilitiesMixin` 在左）
+- 被依赖的 Mixin 应放在左侧：如 `CommandsMixin` 依赖 `UtilitiesMixin`，则 `UtilitiesMixin` 在左、`CommandsMixin` 在右
 - 维护 Mixin 清单文档，避免遗漏（当前含 ModerationMixin、AntiFloodMixin、CommandsMixin、UtilitiesMixin 等）
 
 ## 二、配置设计规范
