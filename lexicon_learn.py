@@ -31,7 +31,9 @@ except ImportError:  # 独立加载（单元测试用 spec_from_file_location）
     from automaton import HybridMatcher
 
 # 单群消息缓冲上限（条）；超出后按 FIFO 丢弃最旧，防止内存无界增长。
-_LEARN_BUFFER_MAX = 1000
+# 每轮挖掘取最近 sample_size 条后清空缓冲，故上限贴近样本硬上限即可，
+# 设过大只会占内存而不会被用到（每轮至多消费 _LEARN_SAMPLE_HARD_CAP 条）。
+_LEARN_BUFFER_MAX = 300
 # 最多跟踪多少个群的缓冲，超过则不再为新群建缓冲（极端保护，正常远不会触及）。
 _LEARN_MAX_GROUPS = 1000
 # 单条消息进缓冲时的截断长度。
@@ -228,12 +230,17 @@ class LexiconLearnMixin:
         now = int(time.time())
         accepted = 0
         applied = 0
+        seen_this_round = set()  # 单轮内去重：LLM 可能重复返回同词，避免一轮内把出现次数刷高
         for cand in candidates:
             if accepted >= max_per_run:
                 break
             kw = cand.get("keyword", "")
             if not self._learn_keyword_ok(kw, min_len, allowlist):
                 continue
+            kw_norm = kw.strip().lower()
+            if kw_norm in seen_this_round:
+                continue
+            seen_this_round.add(kw_norm)
             category = cand.get("category", "ad")
             category = "swear" if category == "swear" else "ad"
             confidence = cand.get("confidence", 0.0)

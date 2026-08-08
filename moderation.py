@@ -514,6 +514,9 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
 
     # 语义候选标签（非真实规则/词库命中）：LLM 判定用，不算 fail-closed 的"命中"。
     _SEMANTIC_HIT_LABELS = ("full_scan", "context_scan", "image_scan", "oversized")
+    # fail-closed 时应排除的键：语义候选标签 + 自适应学习词（AI 启发式，可信度低于人工词库，
+    # 绝不因 LLM 失效就未经确认撤回；仅当 LLM 正常复核判违规才处理）。
+    _NEVER_FAIL_CLOSED_HITS = _SEMANTIC_HIT_LABELS + ("learned_ad", "learned_swear")
 
     def _llm_failure_requires_rule_penalty(self, llm_result: dict,
                                            hit_types: Dict[str, bool],
@@ -533,7 +536,7 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
         cfg = getattr(self, "_cfg", None)
         if callable(cfg) and cfg("moderation_llm_fail_closed", False, group_id=group_id):
             real_hit = any(
-                v for k, v in hit_types.items() if k not in self._SEMANTIC_HIT_LABELS
+                v for k, v in hit_types.items() if k not in self._NEVER_FAIL_CLOSED_HITS
             )
             if real_hit:
                 return True
@@ -2203,13 +2206,19 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
         for cat, hit in self._check_lexicon(text).items():
             if cat in hit_types and hit and switch_map.get(cat, True):
                 hit_types[cat] = True
-        # 自适应学习词：按群独立、管理员审批后生效，命中计入对应类别（ad/swear）。
+        # 自适应学习词：按群独立、管理员审批后生效。命中记为【专用类别】learned_ad/learned_swear，
+        # 而非直接置 ad/swear —— 关键安全设计：学习词是 AI 生成的启发式规则，可信度低于人工词库，
+        # 因此绝不能走"高置信度脏话在 LLM 失效时 fail-closed 直接撤回"那条路（见
+        # _llm_failure_requires_rule_penalty）。用专用键后：learned_* 仍算真实命中→触发 LLM 复核，
+        # 但 LLM 失效/降级时 learned-only 的命中会被放行，不会未经确认就撤回。
         learned_hit_fn = getattr(self, "_learned_hit", None)
         if learned_hit_fn and self._cfg("lexicon_learn_enabled", False, group_id=group_id):
             try:
                 learned_cat = learned_hit_fn(group_id, text)
-                if learned_cat in hit_types:
-                    hit_types[learned_cat] = True
+                if learned_cat == "swear":
+                    hit_types["learned_swear"] = True
+                elif learned_cat == "ad":
+                    hit_types["learned_ad"] = True
             except Exception:
                 pass
         return hit_types

@@ -248,6 +248,7 @@ class GroupStorageMixin:
                 "VALUES(?, ?, ?, 'pending', ?, ?, ?, 1, ?, ?, ?) "
                 "ON CONFLICT(group_id, keyword) DO UPDATE SET "
                 "occurrences = occurrences + 1, "
+                "category = excluded.category, "  # 跟随最新一次挖掘的分类，与审批门用的当次分类一致
                 "reason = excluded.reason, "
                 "sample = excluded.sample, "
                 "confidence = MAX(confidence, excluded.confidence), "

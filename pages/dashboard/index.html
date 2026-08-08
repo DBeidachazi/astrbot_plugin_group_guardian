@@ -1345,7 +1345,11 @@ async function loadLearnConfig() {
       else if (inp.dataset.learnType === 'float') val = parseFloat(inp.value) || 0;
       else val = inp.value;
       var ok = await postOrToast('lexicon_learn/config/set', { key: inp.dataset.learnKey, value: val }, '已保存', '保存失败');
-      if (!ok && inp.dataset.learnType === 'bool') inp.checked = !inp.checked;
+      if (!ok) {
+        // 保存失败回滚：bool 直接翻回，其它类型重载配置以恢复真实值，避免前后端静默不一致
+        if (inp.dataset.learnType === 'bool') inp.checked = !inp.checked;
+        else loadLearnConfig();
+      }
     });
   });
 }
@@ -1376,8 +1380,7 @@ async function loadLearnCandidates() {
       '</td><td style="max-width:240px">' + esc(r.reason || '') + (r.sample ? '<br><span class="rules-subtle">例: ' + esc(r.sample) + '</span>' : '') +
       '</td><td style="white-space:nowrap">' + acts + '</td></tr>';
   }).join('');
-  var counts = (res && res.counts) ? res.counts : null;
-  var summary = counts ? ('<div class="rules-status">待审批 ' + counts.pending + ' · 已生效 ' + counts.approved + ' · 已拒绝 ' + counts.rejected + '</div>') : '';
+  var summary = '<div class="rules-status">当前筛选下共 ' + list.length + ' 条候选</div>';
   c.innerHTML = summary + '<table class="log-table"><thead><tr><th>关键词</th><th>类别</th><th>置信度</th><th>次数</th><th>群号</th><th>状态</th><th>理由/样例</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>';
   $$('[data-learn-act]', c).forEach(function(btn) {
     btn.addEventListener('click', async function() {
@@ -1385,7 +1388,7 @@ async function loadLearnCandidates() {
       var id = btn.dataset.learnId;
       var path = 'lexicon_learn/' + act;
       var msg = act === 'approve' ? '已通过并生效' : (act === 'reject' ? '已拒绝' : '已删除');
-      if (act === 'delete' && !(await confirmModal('确定删除该候选词吗？'))) return;
+      if (act === 'delete' && !(await confirmModal({ title: '删除候选词', body: '确认删除该候选词吗？', okText: '删除', danger: true }))) return;
       if (await postOrToast(path, { id: id }, msg, '操作失败')) loadLearnCandidates();
     });
   });
@@ -3454,8 +3457,8 @@ async function init() {
   });
   bindClick('btnCardRecClear', async function() {
     var g = ($('#cardRecGroup').value || '').trim();
-    var msg = g ? ('确定清空群 ' + g + ' 的名片记录吗？') : '确定清空全部名片记录吗？';
-    if (await confirmModal(msg)) {
+    var msg = g ? ('确定清空群 <b>' + esc(g) + '</b> 的名片记录吗？') : '确定清空<b>全部</b>名片记录吗？';
+    if (await confirmModal({ title: '清空名片记录', body: msg, okText: '清空', danger: true })) {
       if (await postOrToast('card_monitor/records/clear', { group_id: g }, '已清空', '清空失败')) loadCardRecords();
     }
   });

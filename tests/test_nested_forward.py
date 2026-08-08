@@ -1424,6 +1424,21 @@ class NestedForwardTests(unittest.TestCase):
                 fallback, {"ad": True}, text
             ))
 
+    def test_learned_keywords_never_fail_closed_without_llm(self):
+        """自适应学习词（learned_ad/learned_swear）在 LLM 失效时不得未经确认就撤回。"""
+        harness = _Harness()
+        fallback = {"violation": False, "fallback": True}
+        # 仅学习词命中 → LLM 降级时应放行（返回 False），不 fail-closed
+        for hits in ({"learned_swear": True}, {"learned_ad": True},
+                     {"learned_swear": True, "learned_ad": True}):
+            self.assertFalse(harness._llm_failure_requires_rule_penalty(
+                fallback, dict(hits), "谁要AI中转账号"
+            ))
+        # 但人工词库的 swear 命中仍按原逻辑 fail-closed（回归保护）
+        self.assertTrue(harness._llm_failure_requires_rule_penalty(
+            fallback, {"swear": True}, "cs"
+        ))
+
     def test_moderation_llm_rejects_numeric_boolean_values(self):
         event = _Event([])
         for numeric in (0, 1, -1, 0.5):

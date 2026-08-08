@@ -2051,8 +2051,15 @@ class WebMixin:
             run_fn = getattr(self, "_run_lexicon_learning", None)
             if not callable(run_fn):
                 return jsonify({"status": "error", "message": "学习功能不可用"})
-            # 后台执行，避免阻塞请求（挖掘含 LLM 调用可能较慢）
-            asyncio.create_task(run_fn())
+            # 后台执行，避免阻塞请求（挖掘含 LLM 调用可能较慢）。
+            # 必须持有 task 引用，否则事件循环只保弱引用，任务可能在完成前被 GC。
+            task = asyncio.create_task(run_fn())
+            tasks = getattr(self, "_learn_adhoc_tasks", None)
+            if tasks is None:
+                tasks = set()
+                self._learn_adhoc_tasks = tasks
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
             return jsonify({"status": "success", "message": "已触发一次学习挖掘，稍后在候选列表查看结果"})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)})

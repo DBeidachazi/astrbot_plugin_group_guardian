@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.8.1 - 2026-08-08
+
+### 修复：v2.8.0 多智能体审查确认的问题
+
+一轮 Sonnet 多维审查 + 对抗验证（19 agents）确认并已修复：
+
+- **【高】自适应学习词在 LLM 失效时会未经确认直接撤回**（moderation.py）：此前学习词命中直接置
+  `swear`/`ad` 类别，导致 swear 类学习词走上"高置信度脏话在 LLM 降级时 fail-closed 直接撤回"的路。
+  学习词是 AI 启发式规则，可信度低于人工词库，绝不能未经 LLM 复核就撤回。现改为专用类别
+  `learned_ad`/`learned_swear`：仍触发 LLM 复核，但 LLM 失效/降级时 learned-only 命中一律放行；
+  即便开启 `moderation_llm_fail_closed` 严格模式也不对学习词 fail-closed。补回归测试。
+- **【中】`confirmModal` 传参错误致确认弹窗内容为空**（index.html）：`confirmModal` 收 opts 对象而非字符串。
+  修正「删除候选词」与「清空名片记录」两处（后者是 v2.7.0 遗留），改传 `{title, body, danger}`。
+- **【中】学习缓冲 `_LEARN_BUFFER_MAX` 1000 远大于每轮取样**：每轮取最近 sample_size 后清空，
+  1000 上限形同虚设。降到 300（贴近样本硬上限），避免误导与无谓内存占用。
+- **【中】`/lexicon_learn/run` 触发的 task 未持引用**（web.py）：事件循环仅保弱引用，任务可能在完成前被 GC。
+  现用 `_learn_adhoc_tasks` 集合持有并在完成回调中移除。
+- **【中】单轮挖掘内重复关键词未去重**（lexicon_learn.py）：LLM 一次返回同词多次会在一轮内把出现次数刷高。
+  加单轮 `seen` 去重。
+- **【中】`upsert_learned_candidate` 冲突时冻结 category**（storage_group.py）：与审批门用的当次分类可能脱节。
+  改为跟随最新一次挖掘的分类。
+- **【中/低】候选统计 counts 被 `unwrapApiResponse` 丢弃致摘要永不显示**：改为显示当前筛选下的实时条数。
+- **【低】学习配置 int/float/string 保存失败不回滚**：失败时重载配置，避免前后端静默不一致。
+
+> 说明：审查工作流因脚本聚合逻辑的一个 bug 误报「0 问题」，经核对 journal 发现 14 条发现全部验证为真，
+> 已据此逐条修复上述高价值项；其余低风险项（`clear_learned` 备用 API、`ON CONFLICT` 依赖现代 SQLite 等）评估后保留。
+
 ## v2.8.0 - 2026-08-08
 
 ### 新功能：自适应上下文学习（词库自我进化）
