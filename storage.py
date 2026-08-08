@@ -86,6 +86,10 @@ class SQLiteStorage(GroupStorageMixin):
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        # synchronous 是连接级设置、不随 WAL 持久化到库文件；_create_tables 里那次设置
+        # 只对建表连接生效，之后每个 _connect() 都会回落到默认 FULL。这里每连接显式设为
+        # NORMAL，配合已持久化的 WAL 模式，减少高频审核日志写入的 fsync 开销。
+        conn.execute("PRAGMA synchronous=NORMAL")
         try:
             yield conn
         finally:
@@ -281,6 +285,26 @@ class SQLiteStorage(GroupStorageMixin):
             ")"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_card_protected_group ON card_protected_members(group_id)")
+
+        # 自适应上下文学习：AI 从群聊上下文挖掘的候选违禁词（按群独立、需审批后生效）
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS learned_keywords ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "group_id TEXT NOT NULL, "
+            "keyword TEXT NOT NULL, "
+            "category TEXT NOT NULL DEFAULT 'ad', "   # ad / swear
+            "status TEXT NOT NULL DEFAULT 'pending', " # pending / approved / rejected
+            "reason TEXT DEFAULT '', "                 # LLM 给出的判定理由
+            "sample TEXT DEFAULT '', "                 # 触发样例文本
+            "confidence REAL DEFAULT 0, "              # LLM 置信度 0-1
+            "occurrences INTEGER DEFAULT 1, "          # 跨轮累计出现次数
+            "source TEXT DEFAULT 'llm', "              # llm / manual
+            "created_at INTEGER NOT NULL, "
+            "updated_at INTEGER NOT NULL, "
+            "UNIQUE(group_id, keyword)"
+            ")"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_learned_group_status ON learned_keywords(group_id, status)")
         conn.commit()
 
     def _ensure_seed_lexicon(self) -> None:

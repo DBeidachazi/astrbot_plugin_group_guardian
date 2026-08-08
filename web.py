@@ -116,6 +116,11 @@ class WebMixin:
             "llm_max_concurrency": (1, 32),
             "kick_recall_count": (1, 50),
             "card_sync_interval": (30, 3600),
+            "lexicon_learn_interval": (30, 3600),
+            "lexicon_learn_min_occurrences": (1, 100),
+            "lexicon_learn_min_length": (2, 20),
+            "lexicon_learn_max_per_run": (1, 50),
+            "lexicon_learn_sample_size": (15, 300),
         }
 
     def _normalize_int_config_value(self, key: str, value) -> int:
@@ -303,6 +308,13 @@ class WebMixin:
                 ("/card_monitor/protected", self._web_card_protected_list, ["GET"], "获取名片保护名单"),
                 ("/card_monitor/protected/add", self._web_card_protected_add, ["POST"], "添加名片保护成员"),
                 ("/card_monitor/protected/remove", self._web_card_protected_remove, ["POST"], "移除名片保护成员"),
+                ("/lexicon_learn/candidates", self._web_learn_candidates, ["GET"], "获取上下文学习候选词"),
+                ("/lexicon_learn/config", self._web_learn_config_get, ["GET"], "获取上下文学习开关"),
+                ("/lexicon_learn/config/set", self._web_learn_config_set, ["POST"], "设置上下文学习开关"),
+                ("/lexicon_learn/approve", self._web_learn_approve, ["POST"], "审批通过学习候选词"),
+                ("/lexicon_learn/reject", self._web_learn_reject, ["POST"], "拒绝学习候选词"),
+                ("/lexicon_learn/delete", self._web_learn_delete, ["POST"], "删除学习候选词"),
+                ("/lexicon_learn/run", self._web_learn_run_now, ["POST"], "立即执行一次学习挖掘"),
             ]
             for path, handler, methods, desc in routes:
                 self.context.register_web_api(
@@ -1904,8 +1916,7 @@ class WebMixin:
             protected_card = str(data.get("protected_card", ""))
             if not group_id or not user_id:
                 return jsonify({"status": "error", "message": "缺少 group_id 或 user_id"})
-            import time as _t
-            self._storage.add_card_protected(group_id, user_id, protected_card, int(_t.time()))
+            self._storage.add_card_protected(group_id, user_id, protected_card, int(time.time()))
             return jsonify({"status": "success", "group_id": group_id, "user_id": user_id})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)})
@@ -1919,5 +1930,129 @@ class WebMixin:
                 return jsonify({"status": "error", "message": "缺少 group_id 或 user_id"})
             ok = self._storage.remove_card_protected(group_id, user_id)
             return jsonify({"status": "success", "removed": ok})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    # ==================== 自适应上下文学习 WebUI API ====================
+    _LEXICON_LEARN_KEYS = [
+        "lexicon_learn_enabled", "lexicon_learn_auto_apply", "lexicon_learn_verify_llm",
+        "lexicon_learn_interval", "lexicon_learn_min_occurrences",
+        "lexicon_learn_min_confidence", "lexicon_learn_min_length",
+        "lexicon_learn_max_per_run", "lexicon_learn_sample_size",
+        "lexicon_learn_provider_id",
+    ]
+
+    async def _web_learn_candidates(self):
+        try:
+            status = str(quart_request.args.get("status", "pending")).strip()
+            if status == "all":
+                status = ""
+            group_id = str(quart_request.args.get("group_id", "")).strip()
+            limit = min(max(self._safe_int(quart_request.args.get("limit", 200), 200), 1), 500)
+            offset = max(0, self._safe_int(quart_request.args.get("offset", 0), 0))
+            data = self._storage.list_learned(group_id=group_id, status=status, limit=limit, offset=offset)
+            total = self._storage.count_learned(group_id=group_id, status=status)
+            counts = {
+                "pending": self._storage.count_learned(group_id=group_id, status="pending"),
+                "approved": self._storage.count_learned(group_id=group_id, status="approved"),
+                "rejected": self._storage.count_learned(group_id=group_id, status="rejected"),
+            }
+            return jsonify({"status": "success", "data": data, "total": total, "counts": counts})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    async def _web_learn_config_get(self):
+        try:
+            cfg = {}
+            for k in self._LEXICON_LEARN_KEYS:
+                meta = self._config_schema.get(k, {})
+                ftype = meta.get("type", "bool")
+                default = meta.get("default", False if ftype == "bool" else ("" if ftype in ("string", "text") else 0))
+                raw = self.config.get(k, default)
+                if ftype == "bool":
+                    value = self._parse_bool(raw, bool(default))
+                elif ftype == "int":
+                    value = self._safe_int(raw, self._safe_int(default, 0))
+                elif ftype == "float":
+                    try:
+                        value = float(raw)
+                    except (TypeError, ValueError):
+                        value = float(default or 0)
+                else:
+                    value = "" if raw is None else str(raw)
+                cfg[k] = {"value": value, "type": ftype,
+                          "description": meta.get("description", k), "hint": meta.get("hint", "")}
+            return jsonify({"status": "success", "data": cfg})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    async def _web_learn_config_set(self):
+        try:
+            data = await quart_request.get_json(force=True, silent=True) or {}
+            key = str(data.get("key", "")).strip()
+            if key not in self._LEXICON_LEARN_KEYS:
+                return jsonify({"status": "error", "message": "非法配置项"})
+            meta = self._config_schema.get(key, {})
+            ftype = meta.get("type", "bool")
+            raw = data.get("value")
+            if ftype == "bool":
+                value = self._parse_bool(raw, False)
+            elif ftype == "int":
+                value = self._normalize_int_config_value(key, raw)
+            elif ftype == "float":
+                try:
+                    value = max(0.0, min(1.0, float(raw)))
+                except (TypeError, ValueError):
+                    value = float(meta.get("default", 0) or 0)
+            else:
+                value = "" if raw is None else str(raw)
+            self.config[key] = value
+            self._save_config_safe()
+            self._invalidate_group_cfg_cache()
+            return jsonify({"status": "success", "key": key, "value": value})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    async def _web_learn_approve(self):
+        try:
+            data = await quart_request.get_json(force=True, silent=True) or {}
+            kid = self._safe_int(data.get("id"), 0)
+            if not kid:
+                return jsonify({"status": "error", "message": "缺少 id"})
+            row = self._learn_set_status(kid, "approved")
+            return jsonify({"status": "success", "data": row})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    async def _web_learn_reject(self):
+        try:
+            data = await quart_request.get_json(force=True, silent=True) or {}
+            kid = self._safe_int(data.get("id"), 0)
+            if not kid:
+                return jsonify({"status": "error", "message": "缺少 id"})
+            row = self._learn_set_status(kid, "rejected")
+            return jsonify({"status": "success", "data": row})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    async def _web_learn_delete(self):
+        try:
+            data = await quart_request.get_json(force=True, silent=True) or {}
+            kid = self._safe_int(data.get("id"), 0)
+            if not kid:
+                return jsonify({"status": "error", "message": "缺少 id"})
+            row = self._learn_delete(kid)
+            return jsonify({"status": "success", "data": row})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    async def _web_learn_run_now(self):
+        try:
+            run_fn = getattr(self, "_run_lexicon_learning", None)
+            if not callable(run_fn):
+                return jsonify({"status": "error", "message": "学习功能不可用"})
+            # 后台执行，避免阻塞请求（挖掘含 LLM 调用可能较慢）
+            asyncio.create_task(run_fn())
+            return jsonify({"status": "success", "message": "已触发一次学习挖掘，稍后在候选列表查看结果"})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)})

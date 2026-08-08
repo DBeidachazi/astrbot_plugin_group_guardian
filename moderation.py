@@ -15,9 +15,9 @@ LLM_CALL_TIMEOUT = 60.0
 LLM_QUEUE_TIMEOUT = 120.0
 STREAM_RULE_SCAN_MAX_CHARS = 100_000
 STREAM_RULE_EVIDENCE_MAX_CHARS = 4000
-LOW_CONFIDENCE_SWEAR_LITERALS = ("啥子",)
-
 try:
+    # 从词库迁移模块导入低置信度脏话字面量，避免与 lexicon_migration 双份真相源漂移。
+    from .lexicon_migration import LOW_CONFIDENCE_LITERALS as LOW_CONFIDENCE_SWEAR_LITERALS
     from .image_audit import ImageAuditMixin
     from .moderation_context import (
         CONTEXT_IMAGE_EVIDENCE_MAX_CHARS,
@@ -26,6 +26,7 @@ try:
         ModerationContextMixin,
     )
 except ImportError:  # 独立加载 moderation.py 的单元测试兼容路径
+    from lexicon_migration import LOW_CONFIDENCE_LITERALS as LOW_CONFIDENCE_SWEAR_LITERALS
     from image_audit import ImageAuditMixin
     from moderation_context import (
         CONTEXT_IMAGE_EVIDENCE_MAX_CHARS,
@@ -511,14 +512,31 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
             # fail-open result.
             return False
 
+    # 语义候选标签（非真实规则/词库命中）：LLM 判定用，不算 fail-closed 的"命中"。
+    _SEMANTIC_HIT_LABELS = ("full_scan", "context_scan", "image_scan", "oversized")
+
     def _llm_failure_requires_rule_penalty(self, llm_result: dict,
                                            hit_types: Dict[str, bool],
-                                           text: str = "") -> bool:
-        """Fail closed for high-confidence or intentionally bounded local rules."""
+                                           text: str = "", group_id: str = "") -> bool:
+        """Fail closed for high-confidence or intentionally bounded local rules.
+
+        默认仅对 oversized（超限未完整扫描）和高置信度脏话 fail-closed，其它类别在
+        LLM 不可用时放行以避免误封。开启 moderation_llm_fail_closed 后，只要存在任一
+        真实规则/词库命中（广告/政治/色情等），LLM 降级时也一律 fail-closed 处罚。
+        """
         if not isinstance(llm_result, dict) or not llm_result.get("fallback", False):
             return False
         if hit_types.get("oversized"):
             return True
+        # 可选严格模式：LLM 降级时对任何真实命中都 fail-closed（默认关，避免 Provider
+        # 抖动时把广告泛词/低置信命中放大成误封）。用 getattr 兼容无 _cfg 的测试桩。
+        cfg = getattr(self, "_cfg", None)
+        if callable(cfg) and cfg("moderation_llm_fail_closed", False, group_id=group_id):
+            real_hit = any(
+                v for k, v in hit_types.items() if k not in self._SEMANTIC_HIT_LABELS
+            )
+            if real_hit:
+                return True
         if not hit_types.get("swear"):
             return False
         return not self._swear_hit_is_low_confidence_only(text)
@@ -1876,6 +1894,12 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
             forward_images = []
             forward_scan = self._new_stream_rule_scan()
 
+        # 自适应上下文学习：把正文纳入按群缓冲（极轻量，内部有开关判断）。
+        # 放在此处：普通成员消息、文本已解析，且不受「自动审核开关」影响。
+        observe_fn = getattr(self, "_learn_observe_message", None)
+        if observe_fn and text:
+            observe_fn(group_id, text)
+
         qq_fav_handled, qq_fav_notice = await self._handle_qq_favorite(event, group_id, user_id, user_name, image_urls, forward_is_qq_favorite)
         if qq_fav_handled:
             if qq_fav_notice:
@@ -2034,7 +2058,7 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
 
         hit_summary = ', '.join(k for k, v in hit_types.items() if v) or "全量审核"
         if not is_violation:
-            if self._llm_failure_requires_rule_penalty(llm_result, hit_types, text):
+            if self._llm_failure_requires_rule_penalty(llm_result, hit_types, text, group_id=group_id):
                 self._set_moderation_combine_state(
                     event, group_id, user_id, extra_recall_ids, "consumed"
                 )
@@ -2179,6 +2203,15 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
         for cat, hit in self._check_lexicon(text).items():
             if cat in hit_types and hit and switch_map.get(cat, True):
                 hit_types[cat] = True
+        # 自适应学习词：按群独立、管理员审批后生效，命中计入对应类别（ad/swear）。
+        learned_hit_fn = getattr(self, "_learned_hit", None)
+        if learned_hit_fn and self._cfg("lexicon_learn_enabled", False, group_id=group_id):
+            try:
+                learned_cat = learned_hit_fn(group_id, text)
+                if learned_cat in hit_types:
+                    hit_types[learned_cat] = True
+            except Exception:
+                pass
         return hit_types
 
     async def _recall_extra_messages(self, event: AiocqhttpMessageEvent, extra_recall_ids: list) -> None:

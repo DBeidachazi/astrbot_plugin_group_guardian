@@ -444,6 +444,10 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","P
           <svg class="nav-icon" viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V8h16v10zM6 11h6v2H6v-2zm0 4h4v2H6v-2z"/></svg>
           <span>名片监控</span>
         </a>
+        <a class="nav-item" data-tab="learn">
+          <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 3L1 9l11 6 9-4.91V17h2V9L12 3zM5 13.18v4L12 21l7-3.82v-4L12 17l-7-3.82z"/></svg>
+          <span>词库学习</span>
+        </a>
         <a class="nav-item" data-tab="settings">
           <svg class="nav-icon" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
           <span>设置</span>
@@ -764,6 +768,29 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","P
         </div>
       </div>
 
+      <div class="tab-panel" id="tab-learn">
+        <div class="page-header"><h1>词库学习</h1>
+          <div class="header-actions">
+            <button class="btn btn-outline btn-sm" id="btnLearnRun">立即学习一次</button>
+            <button class="btn btn-ghost btn-sm" id="btnRefreshLearn">刷新</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>功能开关</h2><span class="rules-subtle">AI 定期从群聊上下文挖掘本群特有引流/广告黑话（如 AI中转、plus日抛team）。默认关闭；候选词需审批后才生效。自动生效需通过多维度审批门</span></div>
+          <div class="settings-list" id="learnConfig" style="padding:8px 16px"><p class="empty">加载中...</p></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>候选词审批</h2>
+            <div class="header-actions">
+              <input type="text" class="input-sm" id="learnGroup" placeholder="按群号筛选" style="width:120px" />
+              <select class="input-sm" id="learnStatus" style="width:130px"><option value="pending">待审批</option><option value="approved">已生效</option><option value="rejected">已拒绝</option><option value="all">全部</option></select>
+              <button class="btn btn-outline btn-sm" id="btnLearnFilter">筛选</button>
+            </div>
+          </div>
+          <div class="log-container" id="learnList"><p class="empty">加载中...</p></div>
+        </div>
+      </div>
+
       <div class="tab-panel" id="tab-settings">
         <div class="page-header"><h1>设置</h1><button class="btn btn-primary btn-sm" id="btnSaveSettings">保存更改</button></div>
         <div class="card" style="margin-bottom:12px">
@@ -874,6 +901,10 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","P
     <a class="mobile-nav-item" data-tab="cardmon">
       <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V8h16v10z"/></svg>
       <span>名片</span>
+    </a>
+    <a class="mobile-nav-item" data-tab="learn">
+      <svg viewBox="0 0 24 24"><path d="M12 3L1 9l11 6 9-4.91V17h2V9L12 3zM5 13.18v4L12 21l7-3.82v-4L12 17l-7-3.82z"/></svg>
+      <span>学习</span>
     </a>
     <a class="mobile-nav-item" data-tab="settings">
       <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
@@ -1161,6 +1192,7 @@ function switchTab(tabName) {
   if (tabName === 'groupcfg') loadGroupCfgGroups();
   if (tabName === 'tasks') { loadAppeals(); loadUnbans(); }
   if (tabName === 'cardmon') loadCardMonitor();
+  if (tabName === 'learn') loadLexiconLearn();
   if (tabName === 'settings') loadSettings();
 }
 
@@ -1274,6 +1306,89 @@ async function loadCardRecords() {
       '</td><td>' + esc(r.user_id) + '</td><td>' + change + '</td><td>' + actBadge + '</td></tr>';
   }).join('');
   c.innerHTML = '<table class="log-table"><thead><tr><th>时间</th><th>类型</th><th>群号</th><th>QQ</th><th>变更</th><th>处理</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+/* ===== 词库学习（自适应上下文学习） ===== */
+async function loadLexiconLearn() {
+  loadLearnConfig();
+  loadLearnCandidates();
+}
+
+async function loadLearnConfig() {
+  var box = $('#learnConfig');
+  var res = await safeGet('lexicon_learn/config');
+  if (isApiError(res)) { box.innerHTML = '<p class="empty">' + esc(res.message) + '</p>'; return; }
+  var order = ['lexicon_learn_enabled','lexicon_learn_auto_apply','lexicon_learn_verify_llm','lexicon_learn_interval','lexicon_learn_min_confidence','lexicon_learn_min_occurrences','lexicon_learn_min_length','lexicon_learn_max_per_run','lexicon_learn_sample_size','lexicon_learn_provider_id'];
+  var html = order.map(function(k) {
+    var it = res[k]; if (!it) return '';
+    var ctrl;
+    if (it.type === 'bool') {
+      ctrl = '<label class="toggle"><input type="checkbox" data-learn-key="' + esc(k) + '" data-learn-type="bool"' + (it.value ? ' checked' : '') + ' /><span class="slider"></span></label>';
+    } else if (it.type === 'int') {
+      ctrl = '<input type="number" class="input-sm" data-learn-key="' + esc(k) + '" data-learn-type="int" value="' + escAttr(String(it.value != null ? it.value : 0)) + '" style="width:120px" />';
+    } else if (it.type === 'float') {
+      ctrl = '<input type="number" step="0.05" min="0" max="1" class="input-sm" data-learn-key="' + esc(k) + '" data-learn-type="float" value="' + escAttr(String(it.value != null ? it.value : 0)) + '" style="width:120px" />';
+    } else {
+      ctrl = '<input type="text" class="input-sm" data-learn-key="' + esc(k) + '" data-learn-type="string" value="' + escAttr(String(it.value != null ? it.value : '')) + '" placeholder="留空=复用审核模型" style="width:220px" />';
+    }
+    return '<div class="setting-item"><div class="setting-info"><div class="setting-label">' + esc(it.description) +
+      ' <span style="font-size:11px;color:var(--text-muted)">(' + esc(k) + ')</span></div>' +
+      (it.hint ? '<div class="setting-desc">' + esc(it.hint) + '</div>' : '') + '</div>' + ctrl + '</div>';
+  }).join('');
+  box.innerHTML = html || '<p class="empty">无配置项</p>';
+  $$('[data-learn-key]', box).forEach(function(inp) {
+    var evt = (inp.dataset.learnType === 'bool') ? 'change' : 'change';
+    inp.addEventListener(evt, async function() {
+      var val;
+      if (inp.dataset.learnType === 'bool') val = inp.checked;
+      else if (inp.dataset.learnType === 'int') val = parseInt(inp.value, 10) || 0;
+      else if (inp.dataset.learnType === 'float') val = parseFloat(inp.value) || 0;
+      else val = inp.value;
+      var ok = await postOrToast('lexicon_learn/config/set', { key: inp.dataset.learnKey, value: val }, '已保存', '保存失败');
+      if (!ok && inp.dataset.learnType === 'bool') inp.checked = !inp.checked;
+    });
+  });
+}
+
+async function loadLearnCandidates() {
+  var c = $('#learnList');
+  c.innerHTML = '<p class="empty">加载中...</p>';
+  var params = { status: ($('#learnStatus').value || 'pending') };
+  var g = ($('#learnGroup').value || '').trim(); if (g) params.group_id = g;
+  params.limit = 300;
+  var res = await safeGet('lexicon_learn/candidates', params);
+  if (isApiError(res)) { c.innerHTML = '<p class="empty">' + esc(res.message) + '</p>'; return; }
+  var list = (res && res.data) ? res.data : (res || []);
+  if (!list.length) { c.innerHTML = '<p class="empty">暂无候选词</p>'; return; }
+  var rows = list.map(function(r) {
+    var catBadge = r.category === 'swear'
+      ? '<span class="badge badge-danger">辱骂</span>'
+      : '<span class="badge badge-warning">广告</span>';
+    var conf = (r.confidence != null) ? (Math.round(r.confidence * 100) + '%') : '--';
+    var statusBadge = r.status === 'approved' ? '<span class="badge badge-success">已生效</span>'
+      : (r.status === 'rejected' ? '<span class="badge badge-default">已拒绝</span>' : '<span class="badge badge-warning">待审批</span>');
+    var acts = '';
+    if (r.status !== 'approved') acts += '<button class="btn btn-primary btn-sm" data-learn-act="approve" data-learn-id="' + r.id + '">通过</button> ';
+    if (r.status !== 'rejected') acts += '<button class="btn btn-outline btn-sm" data-learn-act="reject" data-learn-id="' + r.id + '">拒绝</button> ';
+    acts += '<button class="btn btn-danger btn-sm" data-learn-act="delete" data-learn-id="' + r.id + '">删除</button>';
+    return '<tr><td><b>' + esc(r.keyword) + '</b></td><td>' + catBadge + '</td><td>' + conf +
+      '</td><td>' + (r.occurrences || 1) + '</td><td>' + esc(r.group_id) + '</td><td>' + statusBadge +
+      '</td><td style="max-width:240px">' + esc(r.reason || '') + (r.sample ? '<br><span class="rules-subtle">例: ' + esc(r.sample) + '</span>' : '') +
+      '</td><td style="white-space:nowrap">' + acts + '</td></tr>';
+  }).join('');
+  var counts = (res && res.counts) ? res.counts : null;
+  var summary = counts ? ('<div class="rules-status">待审批 ' + counts.pending + ' · 已生效 ' + counts.approved + ' · 已拒绝 ' + counts.rejected + '</div>') : '';
+  c.innerHTML = summary + '<table class="log-table"><thead><tr><th>关键词</th><th>类别</th><th>置信度</th><th>次数</th><th>群号</th><th>状态</th><th>理由/样例</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  $$('[data-learn-act]', c).forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var act = btn.dataset.learnAct;
+      var id = btn.dataset.learnId;
+      var path = 'lexicon_learn/' + act;
+      var msg = act === 'approve' ? '已通过并生效' : (act === 'reject' ? '已拒绝' : '已删除');
+      if (act === 'delete' && !(await confirmModal('确定删除该候选词吗？'))) return;
+      if (await postOrToast(path, { id: id }, msg, '操作失败')) loadLearnCandidates();
+    });
+  });
 }
 
 async function loadOverview() {
@@ -3342,6 +3457,13 @@ async function init() {
     var msg = g ? ('确定清空群 ' + g + ' 的名片记录吗？') : '确定清空全部名片记录吗？';
     if (await confirmModal(msg)) {
       if (await postOrToast('card_monitor/records/clear', { group_id: g }, '已清空', '清空失败')) loadCardRecords();
+    }
+  });
+  bindClick('btnRefreshLearn', loadLexiconLearn);
+  bindClick('btnLearnFilter', loadLearnCandidates);
+  bindClick('btnLearnRun', async function() {
+    if (await postOrToast('lexicon_learn/run', {}, '已触发学习挖掘，稍后刷新候选列表', '触发失败')) {
+      setTimeout(loadLearnCandidates, 3000);
     }
   });
   bindClick('btnRefreshGroupCfg', loadGroupCfgGroups);

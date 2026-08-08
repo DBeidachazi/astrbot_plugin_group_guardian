@@ -1,5 +1,44 @@
 # Changelog
 
+## v2.8.0 - 2026-08-08
+
+### 新功能：自适应上下文学习（词库自我进化）
+
+让插件从群聊上下文自动学习「本群特有」的引流/广告黑话（如「AI中转」「plus日抛team」），
+沉淀进**按群独立的自训练词库**（`learned_keywords` 表），逐步自我增强审核能力。
+新增独立「词库学习」WebUI 页面。**默认全部关闭**，需在该页开启。
+
+**工作流**：被动采集（消息管线每条进按群环形缓冲，捕获漏审的正常 spam）→ 周期挖掘
+（scheduler 独立低频 loop，默认 300s）→ LLM 从样本里找出反复出现、又不在现有词库里的引流词
+（带置信度/理由/样例）→ 过滤 + 跨轮累计出现次数 → 存为候选 → 审批生效 → 并入该群匹配器参与初筛与撤回判断。
+
+**安全设计（自动加违禁词是高危操作，误加常用词会误删满群消息）**：
+- **默认候选/审核模式**：AI 只产出「建议词」，管理员在 WebUI 审批后才生效。
+- **多维度自动审批门**（`lexicon_learn_auto_apply`，默认关）：候选词要自动生效（进而自动参与撤回），
+  必须**同时通过**五个维度——① 置信度达标 ② 跨轮出现频次达标 ③ 词形合理 ④ 非白名单常用词
+  ⑤ **对抗式 LLM 复核**（专门反驳「这词会不会误伤正常消息」，从严判定）。任一维度不过即转人工。
+- **按群独立**：A 群学到的词只在 A 群匹配，不污染其它群。
+- 最小词长、白名单保护（内置 + 用户可配 `lexicon_learn_allowlist`）、单轮上限、纯数字/纯标点丢弃。
+
+新增配置项（12 个，全部默认安全）：`lexicon_learn_enabled`（总开关，默认关）、`lexicon_learn_auto_apply`、
+`lexicon_learn_verify_llm`、`lexicon_learn_interval`(300s)、`lexicon_learn_min_occurrences`(3)、
+`lexicon_learn_min_confidence`(0.75)、`lexicon_learn_min_length`(2)、`lexicon_learn_max_per_run`(10)、
+`lexicon_learn_sample_size`(60)、`lexicon_learn_provider_id`（可指定便宜模型）、`lexicon_learn_allowlist`。
+
+新增模块 `lexicon_learn.py`（LexiconLearnMixin，加入 Main 继承链）+ `storage_group.py` 的
+`learned_keywords` CRUD + scheduler 独立 `_lexicon_learn_loop` + moderation `_initial_screening`
+按群学习词命中 + web.py 7 个 `/lexicon_learn/*` API + WebUI「词库学习」页 + 18 个回归测试（`test_lexicon_learn.py`）。
+
+### 修复：v2.7.6 扫描报告确认的问题
+
+- **`_connect()` 未设 `synchronous`**（storage.py）：`synchronous` 是连接级、不随 WAL 持久化，
+  除建表那次外每个连接都回落到默认 `FULL`。现每连接显式设 `NORMAL`，减少高频审核日志写入的 fsync 开销。
+- **`LOW_CONFIDENCE_SWEAR_LITERALS` 双源漂移**（moderation.py）：改为从 `lexicon_migration` 导入，
+  消除与词库迁移模块的重复常量（用 try/except 兼容单测的独立加载）。
+- **LLM 全挂时的审核开天窗**：新增可选 `moderation_llm_fail_closed`（默认关，保持原行为）。
+  开启后，LLM 降级时只要命中任一规则/词库类别都 fail-closed 处罚，而非只对超长/高置信脏话。
+- **web.py 重复局部 `import time`**：`_web_card_protected_add` 改用模块级 `time`。
+
 ## v2.7.6 - 2026-07-28
 
 ### 修复：上下文全量审核稳定性

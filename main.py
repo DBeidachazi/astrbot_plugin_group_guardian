@@ -17,6 +17,7 @@ from .appeal import AppealMixin
 from .automaton import HybridMatcher
 from .card_monitor import CardMonitorMixin
 from .commands import CommandsMixin
+from .lexicon_learn import LexiconLearnMixin
 from .constants import PLUGIN_NAME, PLUGIN_VERSION
 from .llm_tools import LlmToolsMixin
 from .membership import MembershipMixin
@@ -30,7 +31,7 @@ from .web import WebMixin
 
 
 @register(PLUGIN_NAME, "zhaisir", "QQ群智能守护者 - AI审核+群管工具集", PLUGIN_VERSION, "https://github.com/zcj-ui/astrbot_plugin_group_guardian")
-class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMonitorMixin, SchedulerMixin, RemoteMixin, LlmToolsMixin, WebMixin, OneBotMixin, UtilitiesMixin, Star):
+class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMonitorMixin, LexiconLearnMixin, SchedulerMixin, RemoteMixin, LlmToolsMixin, WebMixin, OneBotMixin, UtilitiesMixin, Star):
     """插件主类。所有 AstrBot 装饰器注册入口，业务逻辑委托给 mixin 模块。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -87,6 +88,9 @@ class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMo
         self._init_image_audit_resources(llm_concurrency)
         # 防刷屏追踪数据结构
         self._init_anti_flood()
+        # 自适应上下文学习：初始化按群缓冲/匹配器，并从 DB 载入已审批学习词
+        self._init_lexicon_learn()
+        self._load_learned_matchers()
         # 热更新重建状态：前端可轮询显示当前是否在后台重建规则/词库
         self._rebuild_lock = asyncio.Lock()
         self._rebuild_task = None

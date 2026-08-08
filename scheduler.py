@@ -21,6 +21,7 @@ class SchedulerMixin:
         """初始化调度器状态。在 __init__ 中调用。"""
         self._scheduler_task = None
         self._card_sync_task = None
+        self._learn_task = None
         self._scheduler_stop = False
 
     def _start_scheduler(self) -> None:
@@ -34,6 +35,9 @@ class SchedulerMixin:
             # 延迟名片变更检测；没有 CardMonitorMixin 时自动跳过。
             if callable(getattr(self, "_sync_group_cards", None)):
                 self._card_sync_task = asyncio.create_task(self._card_sync_loop())
+            # 自适应上下文学习使用独立低频 loop；没有 LexiconLearnMixin 时自动跳过。
+            if callable(getattr(self, "_run_lexicon_learning", None)):
+                self._learn_task = asyncio.create_task(self._lexicon_learn_loop())
         except RuntimeError:
             # 无运行中的事件循环（极少见），放弃后台任务，不影响其它功能
             logger.debug("[GroupMgr] 无事件循环，跳过调度器启动")
@@ -53,6 +57,12 @@ class SchedulerMixin:
                 await self._card_sync_task
             except asyncio.CancelledError:
                 logger.debug("[GroupMgr] 名片同步任务已取消")
+        if self._learn_task and not self._learn_task.done():
+            self._learn_task.cancel()
+            try:
+                await self._learn_task
+            except asyncio.CancelledError:
+                logger.debug("[GroupMgr] 上下文学习任务已取消")
 
     async def _scheduler_loop(self) -> None:
         consecutive_errors = 0
@@ -116,6 +126,37 @@ class SchedulerMixin:
                 if consecutive_errors >= 5:
                     # 避免协议端持续异常时刷日志和请求；下一轮仍会自动恢复。
                     await asyncio.sleep(min(300, interval))
+                    consecutive_errors = 0
+
+    async def _lexicon_learn_loop(self) -> None:
+        """周期从群聊上下文挖掘候选违禁词（自适应上下文学习）。"""
+        consecutive_errors = 0
+        while not self._scheduler_stop:
+            try:
+                interval = self._clamp_int(
+                    self._cfg_int("lexicon_learn_interval", 300), 300, 30, 3600
+                )
+                # 先睡一个间隔再挖掘，让缓冲积累到足够样本
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(60)
+                continue
+            if self._scheduler_stop:
+                break
+            if not self._lexicon_learn_any_group_enabled():
+                continue
+            try:
+                await self._run_lexicon_learning()
+                consecutive_errors = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(f"[GroupMgr] 上下文学习出错({consecutive_errors}): {e}")
+                if consecutive_errors >= 5:
+                    await asyncio.sleep(min(600, interval))
                     consecutive_errors = 0
 
     def _card_sync_any_group_enabled(self) -> bool:

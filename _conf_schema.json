@@ -741,5 +741,78 @@
         "type": "bool",
         "default": true,
         "hint": "关闭后 /回复撤回 撤回成功时静默处理，不再回复「已撤回被引用的消息」（Issue #44）。撤回失败的错误提示不受影响，仍会提示"
+    },
+    "moderation_llm_fail_closed": {
+        "description": "LLM 不可用时严格拦截（fail-closed）",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关：LLM 全部不可用时，除超长内容和高置信度脏话外的命中会放行，避免 Provider 抖动导致误封。开启后，只要命中任一规则/词库类别，LLM 降级时也一律按规则处罚"
+    },
+    "lexicon_learn_enabled": {
+        "description": "自适应上下文学习总开关",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后 AI 定期从群聊上下文挖掘本群特有的引流/广告黑话（如 AI中转、plus日抛team），沉淀为按群独立的候选词。默认关闭；候选词需在 WebUI「词库学习」页审批后才生效。可按群覆盖"
+    },
+    "lexicon_learn_interval": {
+        "description": "上下文学习挖掘间隔（秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "多久从群聊缓冲挖掘一次候选词，范围 30-3600 秒。间隔越短越及时但 LLM 调用越多；示例值 300（5分钟）"
+    },
+    "lexicon_learn_auto_apply": {
+        "description": "自动生效学习词（多维度自动审批）",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后候选词经【多维度自动审批门】（置信度+出现频次+词形+非常用词+对抗式LLM复核）全部通过即【不经人工】自动生效并参与撤回判断；任一维度不过则转人工。默认关，开启前建议先在候选列表观察学习质量"
+    },
+    "lexicon_learn_verify_llm": {
+        "description": "自动审批的对抗式LLM复核",
+        "type": "bool",
+        "default": true,
+        "hint": "自动生效前额外用一次 LLM【反驳复核】该词是否会误伤正常消息，从严判定；关闭会加快自动生效但显著提高误封风险。仅在「自动生效学习词」开启时生效"
+    },
+    "lexicon_learn_min_occurrences": {
+        "description": "学习词自动生效所需出现次数",
+        "type": "int",
+        "default": 3,
+        "hint": "同一候选词需跨轮累计出现达到该次数才允许自动生效（仅在自动生效开启时约束），范围 1-100。人工审批不受此限"
+    },
+    "lexicon_learn_min_confidence": {
+        "description": "学习词自动生效置信度阈值",
+        "type": "float",
+        "default": 0.75,
+        "hint": "LLM 对候选词的置信度需≥该值才允许自动生效，范围 0-1（仅在自动生效开启时约束）"
+    },
+    "lexicon_learn_min_length": {
+        "description": "学习词最小长度",
+        "type": "int",
+        "default": 2,
+        "hint": "低于该长度的候选词直接丢弃，避免把单字/超短常用词学成违禁词，范围 2-20"
+    },
+    "lexicon_learn_max_per_run": {
+        "description": "单轮单群最多接纳候选数",
+        "type": "int",
+        "default": 10,
+        "hint": "每次挖掘每个群最多接纳多少个候选词，防止一次性灌入过多，范围 1-50"
+    },
+    "lexicon_learn_sample_size": {
+        "description": "每次挖掘的消息样本数",
+        "type": "int",
+        "default": 60,
+        "hint": "每次从群聊缓冲取最近多少条消息喂给学习模型，范围 15-300。越大越全面但单次 LLM 开销越高"
+    },
+    "lexicon_learn_provider_id": {
+        "description": "上下文学习使用的模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "留空则复用审核模型/首个可用 Provider。可单独指定一个便宜的模型做词库学习，降低成本"
+    },
+    "lexicon_learn_allowlist": {
+        "description": "学习白名单（永不学习的词）",
+        "type": "list",
+        "default": [],
+        "hint": "列在此处的词永远不会被学成违禁词，用于保护本群常用词/正常商品名，避免误伤"
     }
 }
