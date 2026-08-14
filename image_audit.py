@@ -2,6 +2,7 @@
 """图片 OCR、二维码解码及受控下载。"""
 
 import asyncio
+import importlib
 import ipaddress
 import socket
 import time
@@ -31,6 +32,62 @@ _QR_DECODER = None      # "cv2" | "pyzbar" | None
 _QR_PROBED = False
 
 
+def _is_public_address(value: str) -> bool:
+    """仅允许可在公网路由的地址，统一拒绝内网及特殊用途网段。"""
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return False
+
+
+def _validated_resolver_records(host: str, port: int, addrinfo: list) -> list:
+    """把 getaddrinfo 结果转为 aiohttp resolver 记录，并拒绝混入的私网地址。"""
+    records = []
+    seen = set()
+    for family, _socktype, proto, _canonname, sockaddr in addrinfo:
+        address = str(sockaddr[0])
+        if not _is_public_address(address):
+            raise OSError(f"拒绝连接非公网地址: {address}")
+        key = (family, address)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append({
+            "hostname": host,
+            "host": address,
+            "port": int(port),
+            "family": family,
+            "proto": proto,
+            "flags": socket.AI_NUMERICHOST,
+        })
+    if not records:
+        raise OSError(f"域名未解析到可用公网地址: {host}")
+    return records
+
+
+class _PublicOnlyResolver:
+    """在 aiohttp 实际建连解析阶段执行公网地址校验，关闭 DNS 重绑定窗口。"""
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        loop = asyncio.get_running_loop()
+        try:
+            addrinfo = await asyncio.wait_for(
+                loop.getaddrinfo(
+                    host,
+                    port,
+                    family=family,
+                    type=socket.SOCK_STREAM,
+                ),
+                timeout=IMAGE_DNS_TIMEOUT,
+            )
+        except asyncio.TimeoutError as exc:
+            raise OSError(f"DNS 解析超时: {host}") from exc
+        return _validated_resolver_records(host, port, addrinfo)
+
+    async def close(self):
+        return None
+
+
 def _probe_qr_decoder():
     """探测可用的二维码解码库，结果缓存。优先 OpenCV，其次 pyzbar。"""
     global _QR_DECODER, _QR_PROBED
@@ -38,15 +95,15 @@ def _probe_qr_decoder():
         return _QR_DECODER
     _QR_PROBED = True
     try:
-        import cv2  # noqa: F401
-        import numpy  # noqa: F401
+        importlib.import_module("cv2")
+        importlib.import_module("numpy")
         _QR_DECODER = "cv2"
         return _QR_DECODER
     except Exception:
         pass
     try:
-        from PIL import Image  # noqa: F401
-        from pyzbar import pyzbar  # noqa: F401
+        importlib.import_module("PIL.Image")
+        importlib.import_module("pyzbar.pyzbar")
         _QR_DECODER = "pyzbar"
         return _QR_DECODER
     except Exception:
@@ -603,24 +660,13 @@ class ImageAuditMixin:
         if not host:
             return True
         try:
-            address = ipaddress.ip_address(host)
-            return (
-                address.is_private
-                or address.is_loopback
-                or address.is_link_local
-                or address.is_reserved
-            )
+            ipaddress.ip_address(host)
+            return not _is_public_address(host)
         except ValueError:
             pass
         try:
             for info in socket.getaddrinfo(host, None):
-                address = ipaddress.ip_address(info[4][0])
-                if (
-                    address.is_private
-                    or address.is_loopback
-                    or address.is_link_local
-                    or address.is_reserved
-                ):
+                if not _is_public_address(info[4][0]):
                     return True
             return False
         except Exception:
@@ -663,7 +709,17 @@ class ImageAuditMixin:
                 import aiohttp
             except Exception:
                 return None
-            session = aiohttp.ClientSession()
+            connector_cls = getattr(aiohttp, "TCPConnector", None)
+            if connector_cls is None:
+                # 单元测试的最小 aiohttp stub 不提供连接器。
+                session = aiohttp.ClientSession()
+            else:
+                connector = connector_cls(
+                    resolver=_PublicOnlyResolver(),
+                    use_dns_cache=True,
+                    ttl_dns_cache=300,
+                )
+                session = aiohttp.ClientSession(connector=connector)
             self._image_http_session = session
             return session
 

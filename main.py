@@ -22,6 +22,7 @@ from .constants import PLUGIN_NAME, PLUGIN_VERSION
 from .llm_tools import LlmToolsMixin
 from .membership import MembershipMixin
 from .moderation import ModerationMixin
+from .moderation_review import ModerationReviewMixin
 from .onebot import OneBotMixin
 from .remote import RemoteMixin
 from .scheduler import SchedulerMixin
@@ -31,7 +32,7 @@ from .web import WebMixin
 
 
 @register(PLUGIN_NAME, "zhaisir", "QQ群智能守护者 - AI审核+群管工具集", PLUGIN_VERSION, "https://github.com/zcj-ui/astrbot_plugin_group_guardian")
-class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMonitorMixin, LexiconLearnMixin, SchedulerMixin, RemoteMixin, LlmToolsMixin, WebMixin, OneBotMixin, UtilitiesMixin, Star):
+class Main(ModerationMixin, ModerationReviewMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMonitorMixin, LexiconLearnMixin, SchedulerMixin, RemoteMixin, LlmToolsMixin, WebMixin, OneBotMixin, UtilitiesMixin, Star):
     """插件主类。所有 AstrBot 装饰器注册入口，业务逻辑委托给 mixin 模块。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -86,6 +87,7 @@ class Main(ModerationMixin, AntiFloodMixin, AppealMixin, MembershipMixin, CardMo
         # 审核上下文独立于防刷屏队列，并负责合并/限流群历史请求。
         self._init_moderation_context_resources(llm_concurrency)
         self._init_image_audit_resources(llm_concurrency)
+        self._init_moderation_review()
         # 防刷屏追踪数据结构
         self._init_anti_flood()
         # 自适应上下文学习：初始化按群缓冲/匹配器，并从 DB 载入已审批学习词

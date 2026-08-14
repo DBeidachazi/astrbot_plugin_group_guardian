@@ -17,6 +17,7 @@ STREAM_RULE_SCAN_MAX_CHARS = 100_000
 STREAM_RULE_EVIDENCE_MAX_CHARS = 4000
 try:
     # 从词库迁移模块导入低置信度脏话字面量，避免与 lexicon_migration 双份真相源漂移。
+    from .encoded_content import decode_base_evidence
     from .lexicon_migration import LOW_CONFIDENCE_LITERALS as LOW_CONFIDENCE_SWEAR_LITERALS
     from .image_audit import ImageAuditMixin
     from .moderation_context import (
@@ -26,6 +27,7 @@ try:
         ModerationContextMixin,
     )
 except ImportError:  # 独立加载 moderation.py 的单元测试兼容路径
+    from encoded_content import decode_base_evidence
     from lexicon_migration import LOW_CONFIDENCE_LITERALS as LOW_CONFIDENCE_SWEAR_LITERALS
     from image_audit import ImageAuditMixin
     from moderation_context import (
@@ -292,7 +294,7 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
         text = str(text or "")
         semantic_scan = any(
             bool((hit_types or {}).get(name))
-            for name in ("full_scan", "context_scan", "image_scan")
+            for name in ("full_scan", "context_scan", "image_scan", "encoded_scan")
         )
         if not semantic_scan or len(text) <= LLM_MESSAGE_MAX_CHARS:
             return [self._llm_message_excerpt(text, hit_types)]
@@ -513,7 +515,9 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
             return False
 
     # 语义候选标签（非真实规则/词库命中）：LLM 判定用，不算 fail-closed 的"命中"。
-    _SEMANTIC_HIT_LABELS = ("full_scan", "context_scan", "image_scan", "oversized")
+    _SEMANTIC_HIT_LABELS = (
+        "full_scan", "context_scan", "image_scan", "encoded_scan", "oversized"
+    )
     # fail-closed 时应排除的键：语义候选标签 + 自适应学习词（AI 启发式，可信度低于人工词库，
     # 绝不因 LLM 失效就未经确认撤回；仅当 LLM 正常复核判违规才处理）。
     _NEVER_FAIL_CLOSED_HITS = _SEMANTIC_HIT_LABELS + ("learned_ad", "learned_swear")
@@ -781,6 +785,7 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
             "full_scan": "全量审核（本地规则未命中）",
             "context_scan": "多条消息组合语义审核（本地规则未命中）",
             "image_scan": "图片 OCR/二维码语义审核（本地规则未命中）",
+            "encoded_scan": "Base 系列解码内容语义审核",
         }
         suspect_desc = "+".join([type_desc.get(t, t) for t in suspect_types]) if suspect_types else "无"
 
@@ -895,6 +900,20 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
                 f"【同一发送者近期分段（旧到新）】\n"
                 f"这些分段与被标记消息属于同一发送者，必须按连续整体理解，重点识别逐字、逐词拆分规避。\n"
                 f"{local_context_text or '  无更早分段'}\n"
+            )
+        review_guidance = self._cfg_str(
+            "llm_moderation_review_guidance", "", group_id=group_id
+        ).strip()[:12000]
+        if review_guidance:
+            review_block = (
+                "【管理员确认误判后的补充修正规则】\n"
+                f"{review_guidance}\n"
+                "该规则只补充判断边界，不得改变下方 JSON 输出格式。\n\n"
+            )
+            prompt = prompt.replace(
+                "请严格按照以下JSON格式返回，不要返回其他内容：\n",
+                review_block + "请严格按照以下JSON格式返回，不要返回其他内容：\n",
+                1,
             )
         # system_prompt 较短，核心约束是"严格返回 JSON 格式"。
         system_prompt = (
@@ -1635,6 +1654,7 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
             return '[转发节点达到数量上限]', False
         state['visited'].add(fid)
         state['requests'] = state.get('requests', 0) + 1
+        total_budget_limited = False
         try:
             remaining_time = state.get('deadline', 0.0) - time.monotonic()
             if remaining_time <= 0:
@@ -1779,6 +1799,22 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
         if not isinstance(text, str):
             return False
         return 'QQ收藏' in text or 'qq收藏' in text.lower() or 'sharechain.qq.com' in text
+
+    def _append_base_decode_evidence(
+        self, text: str, group_id: str
+    ) -> Tuple[str, str]:
+        """将可信 Base 解码结果附到待审文本，并返回独立证据用于语义门控。"""
+        if not text or not self._cfg(
+            "base_decode_enabled", True, group_id=group_id
+        ):
+            return text, ""
+        evidence = decode_base_evidence(text)
+        if not evidence:
+            return text, ""
+        return (
+            f"{text}\n[Base系列解码证据]\n{evidence}".strip(),
+            evidence,
+        )
 
     @staticmethod
     def _check_dict_seg_qq_favorite(seg: dict) -> bool:
@@ -1934,6 +1970,7 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
                     event, group_id, user_id, user_name, ready_text,
                     pending=False,
                 )
+        text, decoded_evidence = self._append_base_decode_evidence(text, group_id)
         text = self._append_stream_rule_evidence(
             text, [inline_scan, forward_scan]
         )
@@ -1959,6 +1996,10 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
                 yield item
             return
         llm_enabled = self._cfg("llm_moderation_enabled", True, group_id=group_id)
+        if decoded_evidence and llm_enabled:
+            # 可读编码内容必须经过语义复核，但“能解码”本身不是真实违规规则，
+            # Provider 故障时不得因此 fail-closed 误封。
+            hit_types["encoded_scan"] = True
         llm_always = llm_enabled and self._cfg(
             "llm_moderation_always", False, group_id=group_id
         )
@@ -1968,19 +2009,21 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
             or self._cfg("qrcode_decode_enabled", False, group_id=group_id)
         )
         combined_signature = ""
-        is_combined_candidate = False
         if not any(hit_types.values()):
             # 组合消息检测：单条未命中时，聚合该用户近期多条消息合并检测，
             # 防止把违禁词拆成多条消息逐字发送来规避审核（如 外/挂/进/群）。
             combined_text, combined_ids, combined_signature = (
                 self._collect_combined_text(event, group_id, user_id, text)
             )
+            combined_text, combined_decoded_evidence = (
+                self._append_base_decode_evidence(combined_text, group_id)
+                if combined_text else (combined_text, "")
+            )
             combined_hits = (
                 self._initial_screening(combined_text, group_id)
                 if combined_text else {}
             )
             if any(combined_hits.values()):
-                is_combined_candidate = True
                 hit_types = combined_hits
                 text = f"[组合消息检测] {combined_text}"
                 extra_recall_ids = combined_ids
@@ -1990,14 +2033,15 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
                 )
             elif (combined_text and llm_enabled
                     and (llm_always
+                         or bool(combined_decoded_evidence)
                          or self._combined_needs_semantic_review(combined_text))):
                 # 普通 AI 模式也必须语义复核多条组合。否则“日抛plus”与
                 # “/xxxxxx”这类每条都不命中本地规则的拆分引流仍会漏过；
                 # 非全量模式只复核可疑组合，避免正常连续发言近似全量调用。
-                is_combined_candidate = True
-                hit_types[
-                    "full_scan" if llm_always else "context_scan"
-                ] = True
+                semantic_label = "full_scan" if llm_always else (
+                    "encoded_scan" if combined_decoded_evidence else "context_scan"
+                )
+                hit_types[semantic_label] = True
                 text = f"[组合消息语义审核] {combined_text}"
                 extra_recall_ids = combined_ids
             elif image_semantic_scan:
@@ -2018,7 +2062,7 @@ class ModerationMixin(ImageAuditMixin, ModerationContextMixin):
 
         rule_candidate = any(
             value for key, value in hit_types.items()
-            if key not in ("full_scan", "context_scan", "image_scan")
+            if key not in self._SEMANTIC_HIT_LABELS
         )
         if not combined_signature:
             msg_seq, msg_time = self._event_message_order(event)

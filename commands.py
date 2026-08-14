@@ -43,7 +43,7 @@ class CommandsMixin:
         days = max(1, min(days, 90))
         try:
             # need_admin=False：字数统计允许普通成员使用
-            ok, err, client, gid = await self._prepare_group_action(event, "word_count_enabled", "字数统计", need_admin=False)
+            ok, err, _, gid = await self._prepare_group_action(event, "word_count_enabled", "字数统计", need_admin=False)
             if not ok:
                 yield event.plain_result(err)
                 return
@@ -423,7 +423,7 @@ class CommandsMixin:
             result = self._extract_data_result(result)
             files = result.get("files", []) if isinstance(result, dict) else []
             folders = result.get("folders", []) if isinstance(result, dict) else []
-            lines = [f"📁 群文件列表:"]
+            lines = ["📁 群文件列表:"]
             for f in folders[:15]:
                 lines.append(f"  📁 {f.get('folder_name', '?')}")
             for f in files[:15]:
