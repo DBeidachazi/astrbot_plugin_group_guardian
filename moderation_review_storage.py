@@ -245,6 +245,15 @@ class ModerationReviewStorageMixin:
             ).fetchall()
         return [self._row_to_suggestion(row) for row in rows]
 
+    def has_newer_applied_prompt_suggestion(self, suggestion_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM moderation_prompt_suggestions "
+                "WHERE id>? AND status='applied' LIMIT 1",
+                (int(suggestion_id),),
+            ).fetchone()
+        return bool(row)
+
     def transition_prompt_suggestion(
         self,
         suggestion_id: int,

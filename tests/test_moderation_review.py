@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -43,6 +44,7 @@ utilities = _load_module(f"{package.__name__}.utils", "utils.py")
 moderation_review = _load_module(
     f"{package.__name__}.moderation_review", "moderation_review.py"
 )
+storage_module = _load_module(f"{package.__name__}.storage", "storage.py")
 
 
 class _PersistentConfig(dict):
@@ -92,6 +94,12 @@ class _ReviewStorage:
     def get_prompt_suggestion(self, suggestion_id):
         item = self.suggestions.get(int(suggestion_id))
         return dict(item) if item else None
+
+    def has_newer_applied_prompt_suggestion(self, suggestion_id):
+        return any(
+            item.get("status") == "applied" and int(item_id) > int(suggestion_id)
+            for item_id, item in self.suggestions.items()
+        )
 
     def transition_prompt_suggestion(
         self, suggestion_id, expected_statuses, new_status, actor, detail
@@ -233,7 +241,7 @@ class ModerationReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(applied["ok"])
         self.assertEqual("applied", storage.suggestions[suggestion_id]["status"])
         self.assertEqual(
-            "仅在存在明确推广意图时判定广告",
+            "旧规则\n\n仅在存在明确推广意图时判定广告",
             harness.config["llm_moderation_review_guidance"],
         )
         self.assertEqual(1, harness.cache_invalidations)
@@ -287,12 +295,255 @@ class ModerationReviewTests(unittest.IsolatedAsyncioTestCase):
             harness._apply_moderation_prompt_suggestion(suggestion_id)["ok"]
         )
 
-        harness.config["llm_moderation_review_guidance"] = "后续人工规则"
+        harness.config["llm_moderation_review_guidance"] = (
+            "仅在存在明确推广意图时判定广告"
+        )
         result = harness._rollback_moderation_prompt_suggestion(suggestion_id)
 
         self.assertFalse(result["ok"])
-        self.assertEqual("后续人工规则", harness.config["llm_moderation_review_guidance"])
+        self.assertEqual(
+            "仅在存在明确推广意图时判定广告",
+            harness.config["llm_moderation_review_guidance"],
+        )
         self.assertEqual("applied", storage.suggestions[suggestion_id]["status"])
+
+    async def test_legacy_applied_candidate_can_still_be_rolled_back(self):
+        storage = _ReviewStorage()
+        storage.suggestions[1] = {
+            "id": 1,
+            "status": "applied",
+            "suggested_guidance": "旧版本覆盖后的规则",
+            "previous_guidance": "被旧版本覆盖的上一轮规则",
+            "detail": "管理员应用修正规则",
+        }
+        harness = _ReviewHarness(
+            storage,
+            config={"llm_moderation_review_guidance": "旧版本覆盖后的规则"},
+        )
+        result = harness._rollback_moderation_prompt_suggestion(1)
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            "被旧版本覆盖的上一轮规则",
+            harness.config["llm_moderation_review_guidance"],
+        )
+
+    async def test_pending_candidate_recovers_partial_persistence(self):
+        guidance = "仅在存在明确推广意图时判定广告"
+        merged = f"旧规则\n\n{guidance}"
+        for persisted, expected_saves in ((merged, 0), (guidance, 1)):
+            with self.subTest(persisted=persisted):
+                storage = _ReviewStorage()
+                storage.suggestions[1] = {
+                    "id": 1,
+                    "status": "pending",
+                    "suggested_guidance": guidance,
+                    "previous_guidance": "旧规则",
+                }
+                harness = _ReviewHarness(
+                    storage,
+                    config={"llm_moderation_review_guidance": persisted},
+                )
+                result = harness._apply_moderation_prompt_suggestion(1)
+                self.assertTrue(result["ok"])
+                self.assertEqual("applied", storage.suggestions[1]["status"])
+                self.assertEqual(
+                    merged, harness.config["llm_moderation_review_guidance"]
+                )
+                self.assertEqual(expected_saves, harness.config.save_calls)
+
+    async def test_applied_candidate_recovers_partial_rollback_persistence(self):
+        storage = _ReviewStorage()
+        storage.suggestions[1] = {
+            "id": 1,
+            "status": "applied",
+            "suggested_guidance": "新增规则",
+            "previous_guidance": "旧规则",
+            "detail": "管理员追加应用修正规则",
+        }
+        harness = _ReviewHarness(
+            storage, config={"llm_moderation_review_guidance": "旧规则"}
+        )
+
+        result = harness._rollback_moderation_prompt_suggestion(1)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("rolled_back", storage.suggestions[1]["status"])
+        self.assertEqual("旧规则", harness.config["llm_moderation_review_guidance"])
+        self.assertEqual(0, harness.config.save_calls)
+
+    async def test_rollback_failures_restore_full_merged_guidance(self):
+        storage = _ReviewStorage(pending=[_sample()])
+        harness = _ReviewHarness(
+            storage, config={"llm_moderation_review_guidance": "旧规则"}
+        )
+        created = await harness._run_moderation_feedback_review(manual=True)
+        suggestion_id = created["suggestion_id"]
+        self.assertTrue(
+            harness._apply_moderation_prompt_suggestion(suggestion_id)["ok"]
+        )
+        merged = "旧规则\n\n仅在存在明确推广意图时判定广告"
+
+        harness.config.fail_save = True
+        save_failed = harness._rollback_moderation_prompt_suggestion(suggestion_id)
+        self.assertFalse(save_failed["ok"])
+        self.assertEqual(merged, harness.config["llm_moderation_review_guidance"])
+        self.assertEqual("applied", storage.suggestions[suggestion_id]["status"])
+
+        harness.config.fail_save = False
+        storage.allow_transition = False
+        transition_failed = harness._rollback_moderation_prompt_suggestion(suggestion_id)
+        self.assertFalse(transition_failed["ok"])
+        self.assertEqual(merged, harness.config["llm_moderation_review_guidance"])
+        self.assertEqual("applied", storage.suggestions[suggestion_id]["status"])
+
+    async def test_multiple_candidates_are_appended_and_duplicates_are_ignored(self):
+        storage = _ReviewStorage(pending=[_sample()])
+        harness = _ReviewHarness(
+            storage, config={"llm_moderation_review_guidance": "第一条规则"}
+        )
+        first = await harness._run_moderation_feedback_review(manual=True)
+        self.assertTrue(
+            harness._apply_moderation_prompt_suggestion(first["suggestion_id"])["ok"]
+        )
+        self.assertEqual(
+            "第一条规则\n\n仅在存在明确推广意图时判定广告",
+            harness.config["llm_moderation_review_guidance"],
+        )
+
+        storage.suggestions[2] = {
+            "id": 2,
+            "status": "pending",
+            "suggested_guidance": "仅在存在明确推广意图时判定广告",
+            "previous_guidance": harness.config["llm_moderation_review_guidance"],
+        }
+        duplicate = harness._apply_moderation_prompt_suggestion(2)
+        self.assertTrue(duplicate["ok"])
+        self.assertEqual(
+            "第一条规则\n\n仅在存在明确推广意图时判定广告",
+            harness.config["llm_moderation_review_guidance"],
+        )
+
+        storage.suggestions[3] = {
+            "id": 3,
+            "status": "pending",
+            "suggested_guidance": "第三条规则",
+            "previous_guidance": harness.config["llm_moderation_review_guidance"],
+        }
+        third = harness._apply_moderation_prompt_suggestion(3)
+        self.assertTrue(third["ok"])
+        self.assertIn("第一条规则", harness.config["llm_moderation_review_guidance"])
+        self.assertIn("第三条规则", harness.config["llm_moderation_review_guidance"])
+
+    def test_multi_paragraph_candidate_is_not_appended_twice(self):
+        existing = "基础规则\n\n第一段\n\n第二段"
+        duplicate = "第一段\n\n第二段"
+
+        merged = moderation_review.ModerationReviewMixin._merge_review_guidance(
+            existing, duplicate
+        )
+
+        self.assertEqual(existing, merged)
+
+    async def test_sqlite_multiple_apply_restart_and_rollback_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = storage_module.SQLiteStorage(Path(temp_dir), str(ROOT))
+            with store._connect() as conn:
+                storage_module.SQLiteStorage._create_tables(conn)
+
+            def add_false_positive(log_id, text):
+                store.add_log({
+                    "id": log_id,
+                    "time": "2026-08-15 12:00:00",
+                    "ts": 1000 + log_id,
+                    "group_id": "123",
+                    "user_id": str(400 + log_id),
+                    "user_name": "tester",
+                    "msg_text": text,
+                    "msg_preview": text,
+                    "action": "撤回+禁言",
+                    "reason": "疑似广告",
+                    "image_urls": [],
+                })
+                feedback_id = store.mark_moderation_feedback(
+                    log_id, "false_positive", "管理员确认正常"
+                )
+                self.assertGreater(feedback_id, 0)
+
+            add_false_positive(71, "第一条正常讨论")
+            harness = _ReviewHarness(
+                store, config={"llm_moderation_review_guidance": "基础规则"}
+            )
+            first = await harness._run_moderation_feedback_review(manual=True)
+            first_id = first["suggestion_id"]
+            self.assertTrue(
+                harness._apply_moderation_prompt_suggestion(first_id)["ok"]
+            )
+            first_merged = "基础规则\n\n仅在存在明确推广意图时判定广告"
+            self.assertEqual(
+                first_merged, harness.config["llm_moderation_review_guidance"]
+            )
+
+            add_false_positive(72, "第二条正常讨论")
+            harness.response = (
+                '{"summary":"补充误判边界",'
+                '"suggested_guidance":"普通商品名本身不构成广告"}'
+            )
+            second = await harness._run_moderation_feedback_review(manual=True)
+            second_id = second["suggestion_id"]
+            self.assertTrue(
+                harness._apply_moderation_prompt_suggestion(second_id)["ok"]
+            )
+            second_merged = f"{first_merged}\n\n普通商品名本身不构成广告"
+            self.assertEqual(
+                second_merged, harness.config["llm_moderation_review_guidance"]
+            )
+            blocked = harness._rollback_moderation_prompt_suggestion(first_id)
+            self.assertFalse(blocked["ok"])
+            self.assertIn("从后向前", blocked["message"])
+            self.assertEqual(
+                second_merged, harness.config["llm_moderation_review_guidance"]
+            )
+
+            reopened = storage_module.SQLiteStorage(Path(temp_dir), str(ROOT))
+            persisted = reopened.get_prompt_suggestion(second_id)
+            self.assertEqual("applied", persisted["status"])
+            self.assertEqual("管理员追加应用修正规则", persisted["audit_note"])
+            audit = reopened.list_review_audit(second_id)
+            self.assertEqual(["applied", "generated"], [row["action"] for row in audit])
+
+            restarted = _ReviewHarness(
+                reopened,
+                config={"llm_moderation_review_guidance": second_merged},
+            )
+            self.assertTrue(
+                restarted._rollback_moderation_prompt_suggestion(second_id)["ok"]
+            )
+            self.assertEqual(
+                first_merged, restarted.config["llm_moderation_review_guidance"]
+            )
+            self.assertTrue(
+                restarted._rollback_moderation_prompt_suggestion(first_id)["ok"]
+            )
+            self.assertEqual(
+                "基础规则", restarted.config["llm_moderation_review_guidance"]
+            )
+
+    async def test_guidance_size_limit_keeps_candidate_pending(self):
+        storage = _ReviewStorage(pending=[_sample()])
+        existing = "x" * (moderation_review.REVIEW_GUIDANCE_MAX_CHARS - 10)
+        harness = _ReviewHarness(
+            storage, config={"llm_moderation_review_guidance": existing}
+        )
+        storage.suggestions[1] = {
+            "id": 1,
+            "status": "pending",
+            "suggested_guidance": "这是超出总长度上限的新规则",
+            "previous_guidance": existing,
+        }
+        result = harness._apply_moderation_prompt_suggestion(1)
+        self.assertFalse(result["ok"])
+        self.assertEqual("pending", storage.suggestions[1]["status"])
+        self.assertEqual(existing, harness.config["llm_moderation_review_guidance"])
 
 
 if __name__ == "__main__":
