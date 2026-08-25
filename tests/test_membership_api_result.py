@@ -127,6 +127,7 @@ class _Harness(
             "join_accept_overrides_lexicon": True,
             "join_reject_use_lexicon": False,
             "join_llm_moderation_enabled": False,
+            "join_llm_web_search_enabled": False,
         }
         self.str_values = {}
         self.lexicon_hits = {}
@@ -140,6 +141,9 @@ class _Harness(
 
     def _cfg_str(self, key, default="", group_id=None):
         return self.str_values.get(key, default)
+
+    def _cfg_int(self, key, default=0, group_id=None):
+        return int(self.cfg_values.get(key, default))
 
     @staticmethod
     def _check_group_access(_event):
@@ -275,6 +279,76 @@ class MembershipApiResultTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(answer, comment)
 
+    def test_question_parser_extracts_question_only(self):
+        comment = "问题：推荐一本原耽小说\n答案：双花"
+
+        question = membership.MembershipMixin._extract_join_question(comment)
+
+        self.assertEqual(question, "推荐一本原耽小说")
+
+    def test_search_decision_requires_queries(self):
+        result = membership.MembershipMixin._normalize_join_llm_result(
+            {"decision": "search", "reason": "冷门术语"}, allow_search=True
+        )
+
+        self.assertTrue(result["fallback"])
+
+    async def test_uncertain_answer_searches_then_reviews_evidence(self):
+        class _SearchHarness(_Harness):
+            def __init__(self):
+                super().__init__()
+                self.cfg_values.update({
+                    "join_llm_web_search_enabled": True,
+                    "join_llm_web_search_max_queries": 2,
+                })
+                self.responses = [
+                    '{"decision":"search","search_queries":["双花 原耽","双花 耽美"],"reason":"冷门词"}',
+                    '{"decision":"accept","reason":"搜索证据表明是相关作品"}',
+                ]
+                self.search_queries = []
+
+            async def _call_llm_safe(self, system_prompt, prompt):
+                self.llm_calls.append((system_prompt, prompt))
+                return self.responses.pop(0)
+
+            async def _join_web_search(self, event, queries):
+                self.search_queries = list(queries)
+                return '【搜索词】双花 原耽\n{"results":[{"title":"双花","snippet":"原耽小说"}]}'
+
+        harness = _SearchHarness()
+        result = await harness._call_llm_for_join_request(
+            "123", "456", "双花", [],
+            question="推荐一本原耽小说", event=object(),
+        )
+
+        self.assertTrue(result["accept"])
+        self.assertEqual(harness.search_queries, ["双花 原耽", "双花 耽美"])
+        self.assertEqual(len(harness.llm_calls), 2)
+        self.assertIn("推荐一本原耽小说", harness.llm_calls[0][1])
+        self.assertIn("Web Search 证据", harness.llm_calls[1][1])
+
+    async def test_search_failure_returns_manual_without_default_action(self):
+        class _SearchFailureHarness(_Harness):
+            async def _join_web_search(self, event, queries):
+                return ""
+
+        harness = _SearchFailureHarness()
+        harness.cfg_values.update({
+            "join_llm_web_search_enabled": True,
+            "join_llm_web_search_max_queries": 2,
+        })
+        harness.llm_response = (
+            '{"decision":"search","search_queries":["双花 原耽"],"reason":"不确定"}'
+        )
+
+        result = await harness._call_llm_for_join_request(
+            "123", "456", "双花", [], event=object()
+        )
+
+        self.assertFalse(result["fallback"])
+        self.assertEqual(result["decision"], "manual")
+        self.assertIsNone(result["accept"])
+
     def test_numeric_llm_accept_value_requires_fallback(self):
         for value in (0, 1, -1, 0.2):
             with self.subTest(value=value):
@@ -372,7 +446,8 @@ class MembershipApiResultTests(unittest.IsolatedAsyncioTestCase):
         _system, prompt = harness.llm_calls[0]
         self.assertIn("只拒绝明确招揽客户的广告", prompt)
         self.assertIn("ad", prompt)
-        self.assertIn('"accept": true/false', prompt)
+        self.assertIn('{"decision":"accept"', prompt)
+        self.assertIn('{"decision":"reject"', prompt)
         self.assertIn("LLM判定通过", harness.logs[0][5])
 
     async def test_llm_rejects_before_default_accept(self):
